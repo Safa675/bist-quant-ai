@@ -14,6 +14,7 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
 const RUN_KINDS: RunKind[] = ["factor_lab", "signal_construct", "signal_backtest", "stock_filter"];
 const RUN_STATUSES: RunStatus[] = ["queued", "running", "succeeded", "failed", "cancelled"];
@@ -90,6 +91,7 @@ export async function POST(request: NextRequest) {
         const requestPayload = isObjectRecord(body.request) ? body.request : null;
         const execute = body.execute === true;
         const blocking = body.blocking === true;
+        const forceBlocking = process.env.RUNS_FORCE_BLOCKING === "1" || process.env.VERCEL === "1";
 
         if (!RUN_KINDS.includes(kind as RunKind)) {
             telemetryInfo("api.runs.create.bad_request", { trace_id: traceId, reason: "invalid_kind", kind });
@@ -127,6 +129,7 @@ export async function POST(request: NextRequest) {
             kind: run.kind,
             execute,
             blocking,
+            force_blocking: forceBlocking,
         });
 
         if (!execute) {
@@ -136,7 +139,14 @@ export async function POST(request: NextRequest) {
             );
         }
 
-        if (blocking) {
+        if (execute && (blocking || forceBlocking)) {
+            if (!blocking && forceBlocking) {
+                telemetryInfo("api.runs.create.force_blocking", {
+                    trace_id: traceId,
+                    run_id: run.id,
+                    kind: run.kind,
+                });
+            }
             const outcome = await executeRunNow(run);
             const statusCode = outcome.run.status === "failed" ? 400 : 200;
 

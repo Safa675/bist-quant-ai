@@ -132,6 +132,30 @@ interface BuilderPayload {
     indicators: IndicatorState;
 }
 
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+    return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isBacktestResult(value: unknown): value is BacktestResult {
+    if (!isObjectRecord(value)) return false;
+    return isObjectRecord(value.meta) && isObjectRecord(value.metrics);
+}
+
+async function readJsonResponse<T>(response: Response): Promise<T> {
+    const raw = await response.text();
+    const trimmed = raw.trim();
+    if (!trimmed) {
+        throw new Error(`Empty response from ${response.url} (${response.status}).`);
+    }
+
+    try {
+        return JSON.parse(trimmed) as T;
+    } catch {
+        const snippet = trimmed.slice(0, 160).replace(/\s+/g, " ");
+        throw new Error(`Non-JSON response from ${response.url} (${response.status}): ${snippet}`);
+    }
+}
+
 const INDICATOR_DEFS: Record<IndicatorKey, IndicatorDef> = {
     rsi: {
         label: "RSI",
@@ -450,19 +474,41 @@ export default function SignalConstructionPage() {
                 body: JSON.stringify({
                     kind: "signal_backtest",
                     execute: true,
+                    blocking: true,
                     request: buildPayload(),
                 }),
             });
-            const data = await response.json() as {
+            const data = await readJsonResponse<{
                 error?: string;
                 run?: RunRecordPayload;
-            };
+                envelope?: {
+                    result?: unknown;
+                    error?: { message?: string };
+                };
+            }>(response);
 
             if (!response.ok || data.error || !data.run?.id) {
                 throw new Error(data.error || `Backtest queue failed (${response.status})`);
             }
             setBacktestRunId(data.run.id);
             setBacktestRunStatus(data.run.status);
+
+            if (data.run.status === "failed" || data.run.status === "cancelled") {
+                throw new Error(
+                    data.envelope?.error?.message ||
+                    data.run.error?.message ||
+                    "Backtest run failed."
+                );
+            }
+
+            if (data.run.status === "succeeded" && isBacktestResult(data.envelope?.result)) {
+                const immediateResult = data.envelope.result;
+                setBacktestResult(immediateResult);
+                if (Array.isArray(immediateResult.current_holdings) && immediateResult.current_holdings.length > 0) {
+                    setSelectedSymbols(new Set(immediateResult.current_holdings));
+                }
+                return;
+            }
 
             const timeoutMs = 15 * 60 * 1000;
             const started = Date.now();
@@ -471,11 +517,11 @@ export default function SignalConstructionPage() {
             while (Date.now() - started < timeoutMs) {
                 await new Promise((resolve) => setTimeout(resolve, 1500));
                 const runResponse = await fetch(`/api/runs/${data.run.id}?include_artifact=1`, { cache: "no-store" });
-                const runData = await runResponse.json() as {
+                const runData = await readJsonResponse<{
                     error?: string;
                     run?: RunRecordPayload;
                     artifact?: unknown;
-                };
+                }>(runResponse);
 
                 if (!runResponse.ok || runData.error || !runData.run) {
                     throw new Error(runData.error || `Backtest status failed (${runResponse.status})`);

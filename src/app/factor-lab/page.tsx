@@ -126,6 +126,30 @@ interface RunRecordPayload {
     error?: RunErrorPayload;
 }
 
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+    return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isFactorLabResult(value: unknown): value is FactorLabResult {
+    if (!isObjectRecord(value)) return false;
+    return isObjectRecord(value.meta) && isObjectRecord(value.metrics);
+}
+
+async function readJsonResponse<T>(response: Response): Promise<T> {
+    const raw = await response.text();
+    const trimmed = raw.trim();
+    if (!trimmed) {
+        throw new Error(`Empty response from ${response.url} (${response.status}).`);
+    }
+
+    try {
+        return JSON.parse(trimmed) as T;
+    } catch {
+        const snippet = trimmed.slice(0, 160).replace(/\s+/g, " ");
+        throw new Error(`Non-JSON response from ${response.url} (${response.status}): ${snippet}`);
+    }
+}
+
 function formatPercent(value: number | null | undefined, digits: number = 2): string {
     if (typeof value !== "number" || !Number.isFinite(value)) return "—";
     const sign = value > 0 ? "+" : "";
@@ -400,14 +424,19 @@ export default function FactorLabPage() {
                 body: JSON.stringify({
                     kind: "factor_lab",
                     execute: true,
+                    blocking: true,
                     request: payload,
                 }),
             });
 
-            const runPayload = await response.json() as {
+            const runPayload = await readJsonResponse<{
                 error?: string;
                 run?: RunRecordPayload;
-            };
+                envelope?: {
+                    result?: unknown;
+                    error?: { message?: string };
+                };
+            }>(response);
 
             if (!response.ok || runPayload.error || !runPayload.run?.id) {
                 throw new Error(runPayload.error || `Backtest queue failed (${response.status})`);
@@ -416,6 +445,21 @@ export default function FactorLabPage() {
             setRunJobId(queuedRunId);
             setRunJobStatus(runPayload.run.status);
 
+            if (runPayload.run.status === "failed" || runPayload.run.status === "cancelled") {
+                throw new Error(
+                    runPayload.envelope?.error?.message ||
+                    runPayload.run.error?.message ||
+                    "Factor run failed."
+                );
+            }
+
+            if (runPayload.run.status === "succeeded" && isFactorLabResult(runPayload.envelope?.result)) {
+                const immediateResult = runPayload.envelope.result;
+                setResult(immediateResult);
+                setPublishName(`factor_lab_${immediateResult.meta.factors.map((factor) => factor.name).slice(0, 2).join("_") || "custom"}`);
+                return;
+            }
+
             const timeoutMs = 15 * 60 * 1000;
             const pollStarted = Date.now();
             let finalArtifact: FactorLabResult | null = null;
@@ -423,11 +467,11 @@ export default function FactorLabPage() {
             while (Date.now() - pollStarted < timeoutMs) {
                 await new Promise((resolve) => setTimeout(resolve, 1500));
                 const runResponse = await fetch(`/api/runs/${queuedRunId}?include_artifact=1`, { cache: "no-store" });
-                const runData = await runResponse.json() as {
+                const runData = await readJsonResponse<{
                     error?: string;
                     run?: RunRecordPayload;
                     artifact?: unknown;
-                };
+                }>(runResponse);
 
                 if (!runResponse.ok || runData.error || !runData.run) {
                     throw new Error(runData.error || `Run status failed (${runResponse.status})`);
