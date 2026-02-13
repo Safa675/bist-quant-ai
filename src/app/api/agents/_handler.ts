@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { type AgentType, generateAgentResponse } from "@/lib/agents/orchestrator";
 import { createRequestId, logError, logInfo, safeErrorMessage } from "@/lib/agents/logging";
+import { generateToolEnabledAgentResponse } from "@/lib/agents/tool-orchestrator";
 import { buildFallbackContext, loadDashboardData, resolveContext } from "./_shared";
 
 function prettyAgentName(agent: AgentType): string {
@@ -54,7 +55,37 @@ export function createAgentPostHandler(agent: AgentType) {
                 holdingsFactorCount: Object.keys(context.holdings).length,
             });
 
-            const responseText = await generateAgentResponse(agent, query, context, { requestId });
+            let result;
+            try {
+                result = await generateToolEnabledAgentResponse(agent, query, context, { requestId });
+            } catch (toolError) {
+                logError("agent.tool_mode.failed_fallback", {
+                    requestId,
+                    agent,
+                    path: request.nextUrl.pathname,
+                    message: safeErrorMessage(toolError),
+                });
+                const fallback = await generateAgentResponse(agent, query, context, { requestId });
+                result = {
+                    response: fallback,
+                    toolsUsed: [] as string[],
+                    toolResults: {},
+                    usage: {
+                        promptTokens: null,
+                        completionTokens: null,
+                        totalTokens: null,
+                    },
+                };
+            }
+            if (!result.response || !result.response.trim()) {
+                const fallback = await generateAgentResponse(agent, query, context, { requestId });
+                result = {
+                    response: fallback,
+                    toolsUsed: result.toolsUsed,
+                    toolResults: result.toolResults,
+                    usage: result.usage,
+                };
+            }
             const latencyMs = Date.now() - startedAt;
 
             logInfo("agent.request.completed", {
@@ -62,7 +93,9 @@ export function createAgentPostHandler(agent: AgentType) {
                 agent,
                 path: request.nextUrl.pathname,
                 latencyMs,
-                responseChars: responseText.length,
+                responseChars: result.response.length,
+                toolsUsed: result.toolsUsed,
+                toolCount: result.toolsUsed.length,
             });
 
             return NextResponse.json({
@@ -70,7 +103,10 @@ export function createAgentPostHandler(agent: AgentType) {
                 request_id: requestId,
                 agent,
                 query,
-                response: responseText,
+                response: result.response,
+                tools_used: result.toolsUsed,
+                tool_results: result.toolResults,
+                usage: result.usage,
                 context: {
                     regime: context.regime,
                     signalCount: context.signals.length,

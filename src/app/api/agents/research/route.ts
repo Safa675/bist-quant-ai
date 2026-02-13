@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createRequestId, logError, logInfo, safeErrorMessage } from "@/lib/agents/logging";
-import { generateResearchResponse } from "@/lib/agents/tool-orchestrator";
+import { generateToolEnabledAgentResponse } from "@/lib/agents/tool-orchestrator";
 import { buildFallbackContext, loadDashboardData, resolveContext } from "../_shared";
 
 export async function POST(request: NextRequest) {
@@ -48,7 +48,7 @@ export async function POST(request: NextRequest) {
             holdingsFactorCount: Object.keys(context.holdings).length,
         });
 
-        const result = await generateResearchResponse(query, context, { requestId });
+        const result = await generateToolEnabledAgentResponse("research", query, context, { requestId });
         const latencyMs = Date.now() - startedAt;
 
         logInfo("research.request.completed", {

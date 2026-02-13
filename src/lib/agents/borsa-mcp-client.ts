@@ -12,7 +12,38 @@
 import { logError, logInfo } from "./logging";
 
 const MCP_ENDPOINT = "https://borsamcp.fastmcp.app/mcp";
-const MCP_TIMEOUT_MS = 30000;
+const _configuredMcpTimeoutMs = Number.parseInt(process.env.BORSA_MCP_TIMEOUT_MS || "12000", 10);
+const MCP_TIMEOUT_MS = Number.isFinite(_configuredMcpTimeoutMs) && _configuredMcpTimeoutMs > 0
+    ? _configuredMcpTimeoutMs
+    : 12000;
+const TOOL_DEFINITION_CACHE_TTL_MS = 5 * 60 * 1000;
+
+interface MCPJsonRpcError {
+    code?: number;
+    message?: string;
+    data?: unknown;
+}
+
+interface MCPJsonRpcPayload {
+    jsonrpc?: string;
+    id?: string | number;
+    result?: unknown;
+    error?: MCPJsonRpcError;
+}
+
+export interface MCPToolDefinition {
+    type: "function";
+    function: {
+        name: string;
+        description: string;
+        parameters: Record<string, unknown>;
+    };
+}
+
+let _toolDefCache: {
+    expiresAt: number;
+    value: MCPToolDefinition[];
+} | null = null;
 
 export interface MCPToolCall {
     tool: string;
@@ -75,7 +106,7 @@ export const BORSA_MCP_TOOLS = {
 /**
  * Tool definitions for Azure OpenAI function calling
  */
-export const BORSA_MCP_TOOL_DEFINITIONS = [
+export const BORSA_MCP_TOOL_DEFINITIONS: MCPToolDefinition[] = [
     {
         type: "function",
         function: {
@@ -353,6 +384,164 @@ export const BORSA_MCP_TOOL_DEFINITIONS = [
     },
 ];
 
+function _extractSseDataLines(raw: string): string[] {
+    const lines = raw.split(/\r?\n/);
+    const dataLines: string[] = [];
+    for (const line of lines) {
+        if (line.startsWith("data:")) {
+            const content = line.slice(5).trim();
+            if (content && content !== "[DONE]") {
+                dataLines.push(content);
+            }
+        }
+    }
+    return dataLines;
+}
+
+function _parseMcpPayload(raw: string, contentType: string): MCPJsonRpcPayload {
+    const isSse = contentType.toLowerCase().includes("text/event-stream");
+
+    if (!isSse) {
+        const parsed = JSON.parse(raw) as unknown;
+        if (parsed && typeof parsed === "object") {
+            return parsed as MCPJsonRpcPayload;
+        }
+        throw new Error("MCP response payload is not an object.");
+    }
+
+    const dataLines = _extractSseDataLines(raw);
+    if (dataLines.length === 0) {
+        throw new Error(`MCP SSE response did not contain data payloads: ${raw.slice(0, 200)}`);
+    }
+
+    const parsedEvents: MCPJsonRpcPayload[] = [];
+    for (const dataLine of dataLines) {
+        try {
+            const parsed = JSON.parse(dataLine) as unknown;
+            if (parsed && typeof parsed === "object") {
+                parsedEvents.push(parsed as MCPJsonRpcPayload);
+            }
+        } catch {
+            continue;
+        }
+    }
+
+    if (parsedEvents.length === 0) {
+        throw new Error(`MCP SSE data was not valid JSON: ${dataLines[0].slice(0, 200)}`);
+    }
+
+    for (let i = parsedEvents.length - 1; i >= 0; i -= 1) {
+        const payload = parsedEvents[i];
+        if (payload.result !== undefined || payload.error !== undefined) {
+            return payload;
+        }
+    }
+
+    return parsedEvents[parsedEvents.length - 1];
+}
+
+function _extractMcpText(value: unknown): string {
+    if (typeof value === "string") {
+        return value.trim();
+    }
+    if (Array.isArray(value)) {
+        return value
+            .map((item) => {
+                if (typeof item === "string") {
+                    return item;
+                }
+                if (item && typeof item === "object" && "text" in item && typeof (item as { text?: unknown }).text === "string") {
+                    return (item as { text: string }).text;
+                }
+                return "";
+            })
+            .filter(Boolean)
+            .join("\n")
+            .trim();
+    }
+    if (value && typeof value === "object") {
+        try {
+            return JSON.stringify(value);
+        } catch {
+            return String(value);
+        }
+    }
+    return "";
+}
+
+function _normalizeToolResult(result: unknown): { ok: boolean; data?: unknown; error?: string } {
+    if (!result || typeof result !== "object") {
+        return { ok: true, data: result };
+    }
+
+    const resultObj = result as {
+        isError?: unknown;
+        content?: unknown;
+        [key: string]: unknown;
+    };
+
+    if (resultObj.isError === true) {
+        const msg = _extractMcpText(resultObj.content) || "MCP tool returned isError=true.";
+        return { ok: false, error: msg };
+    }
+
+    return { ok: true, data: resultObj };
+}
+
+async function _callMcpJsonRpc(
+    method: string,
+    params: Record<string, unknown>,
+    requestId?: string
+): Promise<{ payload?: MCPJsonRpcPayload; status: number; latencyMs: number; raw: string; contentType: string; error?: string }> {
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), MCP_TIMEOUT_MS);
+
+    try {
+        const response = await fetch(MCP_ENDPOINT, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                // borsamcp.fastmcp.app requires clients to accept both response formats
+                // even when we primarily consume JSON-RPC responses.
+                Accept: "application/json, text/event-stream",
+            },
+            body: JSON.stringify({
+                jsonrpc: "2.0",
+                id: requestId || crypto.randomUUID(),
+                method,
+                params,
+            }),
+            signal: controller.signal,
+        });
+
+        const raw = await response.text();
+        const latencyMs = Date.now() - startedAt;
+        const contentType = response.headers.get("content-type") || "";
+
+        if (!response.ok) {
+            return {
+                status: response.status,
+                latencyMs,
+                raw,
+                contentType,
+                error: `MCP request failed (${response.status}): ${raw.slice(0, 200)}`,
+            };
+        }
+
+        const payload = _parseMcpPayload(raw, contentType);
+        return {
+            payload,
+            status: response.status,
+            latencyMs,
+            raw,
+            contentType,
+        };
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
 /**
  * Execute a tool call against Borsa MCP
  */
@@ -369,61 +558,57 @@ export async function executeMCPTool(
     });
 
     try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), MCP_TIMEOUT_MS);
+        const rpc = await _callMcpJsonRpc("tools/call", {
+            name: toolCall.tool,
+            arguments: toolCall.params,
+        }, requestId);
+        const latencyMs = rpc.latencyMs;
 
-        const response = await fetch(MCP_ENDPOINT, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-                jsonrpc: "2.0",
-                id: requestId || crypto.randomUUID(),
-                method: "tools/call",
-                params: {
-                    name: toolCall.tool,
-                    arguments: toolCall.params,
-                },
-            }),
-            signal: controller.signal,
-        });
-
-        clearTimeout(timeoutId);
-
-        const latencyMs = Date.now() - startedAt;
-
-        if (!response.ok) {
-            const errorText = await response.text();
+        if (rpc.error) {
             logError("mcp.tool.error", {
                 requestId: requestId || null,
                 tool: toolCall.tool,
-                status: response.status,
+                status: rpc.status,
                 latencyMs,
-                error: errorText.slice(0, 500),
+                error: rpc.error,
             });
 
             return {
                 success: false,
-                error: `MCP request failed (${response.status}): ${errorText.slice(0, 200)}`,
+                error: rpc.error,
                 latencyMs,
             };
         }
 
-        const result = await response.json();
+        const payload = rpc.payload;
+        if (!payload) {
+            return {
+                success: false,
+                error: "MCP tool call returned empty payload.",
+                latencyMs,
+            };
+        }
 
-        // Handle JSON-RPC error response
-        if (result.error) {
+        if (payload.error) {
+            const msg = payload.error.message || JSON.stringify(payload.error);
             logError("mcp.tool.rpc_error", {
                 requestId: requestId || null,
                 tool: toolCall.tool,
                 latencyMs,
-                error: result.error,
+                error: payload.error,
             });
-
             return {
                 success: false,
-                error: result.error.message || JSON.stringify(result.error),
+                error: msg,
+                latencyMs,
+            };
+        }
+
+        const normalized = _normalizeToolResult(payload.result);
+        if (!normalized.ok) {
+            return {
+                success: false,
+                error: normalized.error || "MCP tool returned isError=true.",
                 latencyMs,
             };
         }
@@ -432,12 +617,12 @@ export async function executeMCPTool(
             requestId: requestId || null,
             tool: toolCall.tool,
             latencyMs,
-            hasData: !!result.result,
+            hasData: normalized.data !== undefined,
         });
 
         return {
             success: true,
-            data: result.result,
+            data: normalized.data,
             latencyMs,
         };
     } catch (error) {
@@ -456,6 +641,93 @@ export async function executeMCPTool(
             error: message,
             latencyMs,
         };
+    }
+}
+
+export async function getBorsaMcpToolDefinitions(
+    requestId?: string
+): Promise<MCPToolDefinition[]> {
+    const now = Date.now();
+    if (_toolDefCache && _toolDefCache.expiresAt > now) {
+        return _toolDefCache.value;
+    }
+
+    try {
+        const rpc = await _callMcpJsonRpc("tools/list", {}, requestId);
+        if (rpc.error || !rpc.payload) {
+            throw new Error(rpc.error || "Empty tools/list payload.");
+        }
+        if (rpc.payload.error) {
+            throw new Error(rpc.payload.error.message || JSON.stringify(rpc.payload.error));
+        }
+
+        const toolsRaw = (rpc.payload.result as { tools?: unknown })?.tools;
+        if (!Array.isArray(toolsRaw)) {
+            throw new Error("tools/list did not return a tools array.");
+        }
+
+        const mapped = toolsRaw
+            .map((tool) => {
+                if (!tool || typeof tool !== "object") {
+                    return null;
+                }
+
+                const candidate = tool as {
+                    name?: unknown;
+                    description?: unknown;
+                    inputSchema?: unknown;
+                };
+
+                const name = typeof candidate.name === "string" ? candidate.name.trim() : "";
+                if (!name) {
+                    return null;
+                }
+
+                const description = typeof candidate.description === "string"
+                    ? candidate.description
+                    : `MCP tool: ${name}`;
+
+                const inputSchema = (candidate.inputSchema && typeof candidate.inputSchema === "object")
+                    ? candidate.inputSchema as Record<string, unknown>
+                    : { type: "object", properties: {}, required: [] };
+
+                return {
+                    type: "function" as const,
+                    function: {
+                        name,
+                        description,
+                        parameters: inputSchema,
+                    },
+                };
+            })
+            .filter((tool): tool is NonNullable<typeof tool> => tool !== null);
+
+        if (mapped.length === 0) {
+            throw new Error("tools/list returned zero usable tools.");
+        }
+
+        _toolDefCache = {
+            expiresAt: now + TOOL_DEFINITION_CACHE_TTL_MS,
+            value: mapped,
+        };
+
+        logInfo("mcp.tools.loaded", {
+            requestId: requestId || null,
+            toolCount: mapped.length,
+            source: "live",
+        });
+
+        return mapped;
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+
+        logError("mcp.tools.fallback", {
+            requestId: requestId || null,
+            message,
+            toolCount: BORSA_MCP_TOOL_DEFINITIONS.length,
+        });
+
+        return BORSA_MCP_TOOL_DEFINITIONS;
     }
 }
 

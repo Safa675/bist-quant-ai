@@ -89,7 +89,7 @@ async function fetchAgentResponse(
     }
 ): Promise<string> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 25_000);
+    const timeout = setTimeout(() => controller.abort(), 45_000);
     let response: Response;
     try {
         response = await fetch(`/api/agents/${agent}`, {
@@ -102,7 +102,7 @@ async function fetchAgentResponse(
         });
     } catch (error) {
         if (error instanceof Error && error.name === "AbortError") {
-            throw new Error("Agent API request timed out after 25s.");
+            throw new Error("Agent API request timed out after 45s.");
         }
         throw error;
     } finally {

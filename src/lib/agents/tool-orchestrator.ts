@@ -11,18 +11,19 @@
 
 import { logError, logInfo } from "./logging";
 import {
-    BORSA_MCP_TOOL_DEFINITIONS,
     executeMCPTool,
+    getBorsaMcpToolDefinitions,
     type MCPToolCall,
     type MCPToolResult,
 } from "./borsa-mcp-client";
 
 // Re-export types from base orchestrator
 export type { AgentContext, AgentMessage } from "./orchestrator";
-import type { AgentContext } from "./orchestrator";
-import { buildContext, getAzureOpenAIConfig, validateQuery } from "./orchestrator";
+import type { AgentContext, AgentType } from "./orchestrator";
+import { buildContext, getAzureOpenAIConfig, getSystemPrompt, validateQuery } from "./orchestrator";
 
 export type ResearchAgentType = "research";
+export type ToolEnabledAgentType = AgentType | ResearchAgentType;
 
 interface ToolCall {
     id: string;
@@ -53,34 +54,26 @@ interface ToolOrchestrationOptions {
 }
 
 const RESEARCH_SYSTEM_PROMPT = `You are a Research Analyst AI agent for Quant AI Platform.
-You have access to real-time BIST market data via function calling tools.
+You focus on deep stock/factor investigation for Borsa Istanbul (BIST).
+You can screen names, inspect fundamentals, compare sectors, and summarize findings into actionable views.`;
 
-Your capabilities:
-- Screen stocks using fundamental filters (P/E, P/B, dividend yield, market cap)
-- Screen stocks using technical filters (RSI oversold/overbought, momentum)
-- Fetch detailed financial statements (balance sheet, income statement, cash flow)
-- Get financial ratios (valuation, profitability, liquidity metrics)
-- Run technical scans (MACD signals, Supertrend, golden/death crosses)
-- Compare sectors by various metrics
-- Access TEFAS fund data (836+ funds)
-- Get KAP news and announcements
+const MCP_TOOLING_INSTRUCTIONS = `You have access to live Borsa MCP function tools.
 
-When answering questions:
-1. Use the appropriate tools to fetch real data
-2. Analyze the data and provide insights
-3. Be specific with numbers and metrics
-4. Highlight key findings and actionable insights
-5. Compare results when relevant (vs index, vs sector)
+Tool usage policy:
+1. Use tools whenever the user asks for current prices, screening, rankings, ratios, or news.
+2. If a tool fails, briefly report the failure and try an alternative relevant tool or parameter.
+3. Never claim you cannot access live market data unless tools actually fail.
+4. Keep each tool call lightweight: prefer small batches (e.g., <= 3 symbols per call).
+5. Keep responses concise, numerical, and decision-oriented.
+6. Prefer BIST-specific analysis and mention symbol/index names explicitly.
 
 Available screening presets: value_stocks, growth_stocks, high_dividend, low_pe, high_momentum, oversold, overbought, breakout, undervalued, quality, small_cap, large_cap
-
-Available scan types: oversold, overbought, macd_bullish, macd_bearish, supertrend_buy, supertrend_sell, golden_cross, death_cross
-
-Respond in a clear, analytical style suitable for retail investors.`;
+Available scan types: oversold, overbought, macd_bullish, macd_bearish, supertrend_buy, supertrend_sell, golden_cross, death_cross`;
 
 const MAX_TOOL_ITERATIONS = 5;
 const DEFAULT_MAX_RETRIES = 2;
 const RETRY_DELAY_MS = 1000;
+const MAX_CONSECUTIVE_ALL_TOOL_FAILURES = 2;
 
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -105,9 +98,60 @@ function _extractToolCalls(payload: unknown): ToolCall[] {
 }
 
 function _extractAssistantText(payload: unknown): string {
-    const choices = (payload as { choices?: Array<{ message?: { content?: string | null } }> })?.choices;
-    const content = choices?.[0]?.message?.content;
-    return typeof content === "string" ? content.trim() : "";
+    const message = (payload as {
+        choices?: Array<{
+            message?: {
+                content?: string | Array<{ text?: string } | string> | null;
+                refusal?: string | Array<{ text?: string } | string> | null;
+            };
+        }>;
+    })?.choices?.[0]?.message;
+
+    const content = message?.content;
+    if (typeof content === "string") {
+        return content.trim();
+    }
+    if (Array.isArray(content)) {
+        const merged = content
+            .map((part) => {
+                if (typeof part === "string") {
+                    return part;
+                }
+                if (part && typeof part === "object" && typeof part.text === "string") {
+                    return part.text;
+                }
+                return "";
+            })
+            .join("\n")
+            .trim();
+        if (merged) {
+            return merged;
+        }
+    }
+
+    const refusal = message?.refusal;
+    if (typeof refusal === "string" && refusal.trim()) {
+        return refusal.trim();
+    }
+    if (Array.isArray(refusal)) {
+        const merged = refusal
+            .map((part) => {
+                if (typeof part === "string") {
+                    return part;
+                }
+                if (part && typeof part === "object" && typeof part.text === "string") {
+                    return part.text;
+                }
+                return "";
+            })
+            .join("\n")
+            .trim();
+        if (merged) {
+            return merged;
+        }
+    }
+
+    return "";
 }
 
 function _extractFinishReason(payload: unknown): string {
@@ -115,10 +159,16 @@ function _extractFinishReason(payload: unknown): string {
     return choices?.[0]?.finish_reason || "";
 }
 
+function getToolSystemPrompt(agent: ToolEnabledAgentType): string {
+    const basePrompt = agent === "research" ? RESEARCH_SYSTEM_PROMPT : getSystemPrompt(agent);
+    return `${basePrompt}\n\n${MCP_TOOLING_INSTRUCTIONS}`;
+}
+
 /**
- * Generate a research response with tool calling
+ * Generate an agent response with tool calling support.
  */
-export async function generateResearchResponse(
+export async function generateToolEnabledAgentResponse(
+    agent: ToolEnabledAgentType,
     query: string,
     context: AgentContext,
     options: ToolOrchestrationOptions = {}
@@ -135,13 +185,19 @@ export async function generateResearchResponse(
 
     const contextStr = buildContext(context);
     const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
+    const maxIterations = options.maxToolCalls ?? MAX_TOOL_ITERATIONS;
+    const toolDefinitions = await getBorsaMcpToolDefinitions(options.requestId);
 
     const toolsUsed: string[] = [];
     const toolResults: Record<string, MCPToolResult> = {};
 
-    // Build initial messages
-    const messages: Array<{ role: string; content?: string; tool_call_id?: string; tool_calls?: ToolCall[] }> = [
-        { role: "system", content: RESEARCH_SYSTEM_PROMPT },
+    const messages: Array<{
+        role: "system" | "user" | "assistant" | "tool";
+        content?: string;
+        tool_call_id?: string;
+        tool_calls?: ToolCall[];
+    }> = [
+        { role: "system", content: getToolSystemPrompt(agent) },
         {
             role: "user",
             content: `Portfolio Context:\n${contextStr}\n\nUser Question:\n${sanitizedQuery}`,
@@ -154,20 +210,21 @@ export async function generateResearchResponse(
         totalTokens: null,
     };
 
-    logInfo("research.agent.start", {
+    let consecutiveAllToolFailures = 0;
+
+    logInfo("tool.agent.start", {
         requestId: options.requestId || null,
+        agent,
         queryChars: sanitizedQuery.length,
-        toolCount: BORSA_MCP_TOOL_DEFINITIONS.length,
+        toolCount: toolDefinitions.length,
+        maxIterations,
     });
 
-    // Tool calling loop
-    for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
+    for (let iteration = 0; iteration < maxIterations; iteration++) {
         const startedAt = Date.now();
-
         let parsed: unknown = null;
         let lastError: Error | null = null;
 
-        // Retry loop for API calls
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
                 const res = await fetch(url, {
@@ -178,7 +235,7 @@ export async function generateResearchResponse(
                     },
                     body: JSON.stringify({
                         messages,
-                        tools: BORSA_MCP_TOOL_DEFINITIONS,
+                        tools: toolDefinitions,
                         tool_choice: "auto",
                         max_completion_tokens: 1500,
                     }),
@@ -217,7 +274,6 @@ export async function generateResearchResponse(
         const finishReason = _extractFinishReason(parsed);
         const toolCalls = _extractToolCalls(parsed);
 
-        // Accumulate usage
         if (usage.promptTokens !== null) {
             totalUsage.promptTokens = (totalUsage.promptTokens || 0) + usage.promptTokens;
         }
@@ -228,8 +284,9 @@ export async function generateResearchResponse(
             totalUsage.totalTokens = (totalUsage.totalTokens || 0) + usage.totalTokens;
         }
 
-        logInfo("research.agent.iteration", {
+        logInfo("tool.agent.iteration", {
             requestId: options.requestId || null,
+            agent,
             iteration,
             latencyMs,
             finishReason,
@@ -238,36 +295,38 @@ export async function generateResearchResponse(
             completionTokens: usage.completionTokens,
         });
 
-        // If no tool calls, we're done
         if (finishReason === "stop" || toolCalls.length === 0) {
             const responseText = _extractAssistantText(parsed);
+            const finalResponse = responseText || (
+                toolsUsed.length > 0
+                    ? "I gathered live data but could not format a final narrative. Please retry with a narrower question."
+                    : "I couldn't generate a response. Please try again."
+            );
 
-            logInfo("research.agent.complete", {
+            logInfo("tool.agent.complete", {
                 requestId: options.requestId || null,
+                agent,
                 iterations: iteration + 1,
                 toolsUsed,
-                responseChars: responseText.length,
+                responseChars: finalResponse.length,
                 totalPromptTokens: totalUsage.promptTokens,
                 totalCompletionTokens: totalUsage.completionTokens,
             });
 
             return {
-                response: responseText || "I couldn't generate a response. Please try again.",
+                response: finalResponse,
                 toolsUsed,
                 toolResults,
                 usage: totalUsage,
             };
         }
 
-        // Process tool calls
-        const assistantMessage: { role: string; content?: string; tool_calls: ToolCall[] } = {
+        messages.push({
             role: "assistant",
             tool_calls: toolCalls,
-        };
-        messages.push(assistantMessage);
+        });
 
-        // Execute tool calls in parallel
-        const toolPromises = toolCalls.map(async (tc) => {
+        const toolResponses = await Promise.all(toolCalls.map(async (tc) => {
             const toolName = tc.function.name;
             let params: Record<string, unknown> = {};
 
@@ -277,10 +336,13 @@ export async function generateResearchResponse(
                 params = {};
             }
 
-            toolsUsed.push(toolName);
+            if (!toolsUsed.includes(toolName)) {
+                toolsUsed.push(toolName);
+            }
 
-            logInfo("research.agent.tool_call", {
+            logInfo("tool.agent.tool_call", {
                 requestId: options.requestId || null,
+                agent,
                 tool: toolName,
                 params,
                 iteration,
@@ -299,11 +361,9 @@ export async function generateResearchResponse(
                 toolName,
                 result,
             };
-        });
+        }));
 
-        const toolResponses = await Promise.all(toolPromises);
-
-        // Add tool results to messages
+        let allToolCallsFailed = toolResponses.length > 0;
         for (const tr of toolResponses) {
             const content = tr.result.success
                 ? JSON.stringify(tr.result.data, null, 2)
@@ -315,29 +375,76 @@ export async function generateResearchResponse(
                 content,
             });
 
-            logInfo("research.agent.tool_result", {
+            if (tr.result.success) {
+                allToolCallsFailed = false;
+            }
+
+            logInfo("tool.agent.tool_result", {
                 requestId: options.requestId || null,
+                agent,
                 tool: tr.toolName,
                 success: tr.result.success,
                 latencyMs: tr.result.latencyMs,
                 iteration,
             });
         }
+
+        if (allToolCallsFailed) {
+            consecutiveAllToolFailures += 1;
+        } else {
+            consecutiveAllToolFailures = 0;
+        }
+
+        if (consecutiveAllToolFailures >= MAX_CONSECUTIVE_ALL_TOOL_FAILURES) {
+            const lastErrors = toolResponses
+                .filter((tr) => !tr.result.success)
+                .map((tr) => `${tr.toolName}: ${tr.result.error || "unknown error"}`);
+
+            const response = [
+                "Live data tools are temporarily failing, so I cannot complete a reliable tool-based answer right now.",
+                ...lastErrors.slice(0, 3),
+            ].join("\n");
+
+            logError("tool.agent.repeated_tool_failures", {
+                requestId: options.requestId || null,
+                agent,
+                iteration,
+                failures: lastErrors,
+            });
+
+            return {
+                response,
+                toolsUsed,
+                toolResults,
+                usage: totalUsage,
+            };
+        }
     }
 
-    // Max iterations reached
-    logError("research.agent.max_iterations", {
+    logError("tool.agent.max_iterations", {
         requestId: options.requestId || null,
-        maxIterations: MAX_TOOL_ITERATIONS,
+        agent,
+        maxIterations,
         toolsUsed,
     });
 
     return {
-        response: "I reached the maximum number of tool calls. Here's what I found with the data gathered so far.",
+        response: "I reached the maximum number of tool calls. Please narrow the request and try again.",
         toolsUsed,
         toolResults,
         usage: totalUsage,
     };
+}
+
+/**
+ * Generate a research response with tool calling
+ */
+export async function generateResearchResponse(
+    query: string,
+    context: AgentContext,
+    options: ToolOrchestrationOptions = {}
+): Promise<ToolOrchestrationResult> {
+    return generateToolEnabledAgentResponse("research", query, context, options);
 }
 
 /**
