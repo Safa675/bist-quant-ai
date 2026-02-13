@@ -759,6 +759,8 @@ export default function FactorLabPage() {
                         )}
 
                         <div style={{ marginTop: 10, fontSize: "0.82rem", color: "var(--text-muted)" }}>
+                            Catalog factors: <strong style={{ color: "var(--text-primary)" }}>{catalog.length}</strong>
+                            {" · "}
                             Enabled factors: <strong style={{ color: "var(--text-primary)" }}>{enabledRows.length}</strong>
                         </div>
                     </div>

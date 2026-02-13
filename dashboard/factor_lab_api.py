@@ -69,6 +69,81 @@ PARAM_SCHEMAS: dict[str, list[dict[str, Any]]] = {
 }
 
 
+FIVE_FACTOR_AXIS_FACTORS: dict[str, dict[str, str]] = {
+    "five_factor_axis_size": {
+        "axis": "size",
+        "label": "13-Axis Rotation · Size",
+        "description": "Standalone size axis from five-factor rotation (small vs big).",
+    },
+    "five_factor_axis_value": {
+        "axis": "value",
+        "label": "13-Axis Rotation · Value",
+        "description": "Standalone value-style axis (value level vs value growth).",
+    },
+    "five_factor_axis_profitability": {
+        "axis": "profitability",
+        "label": "13-Axis Rotation · Profitability",
+        "description": "Standalone profitability-style axis (margin level vs growth).",
+    },
+    "five_factor_axis_investment": {
+        "axis": "investment",
+        "label": "13-Axis Rotation · Investment",
+        "description": "Standalone investment-style axis (conservative vs reinvestment).",
+    },
+    "five_factor_axis_momentum": {
+        "axis": "momentum",
+        "label": "13-Axis Rotation · Momentum",
+        "description": "Standalone momentum axis (winner vs loser).",
+    },
+    "five_factor_axis_risk": {
+        "axis": "risk",
+        "label": "13-Axis Rotation · Risk",
+        "description": "Standalone risk axis (high beta vs low beta).",
+    },
+    "five_factor_axis_quality": {
+        "axis": "quality",
+        "label": "13-Axis Rotation · Quality",
+        "description": "Standalone quality axis (ROE/ROA/accrual/F-score composite).",
+    },
+    "five_factor_axis_liquidity": {
+        "axis": "liquidity",
+        "label": "13-Axis Rotation · Liquidity",
+        "description": "Standalone liquidity axis (Amihud/turnover/spread proxy composite).",
+    },
+    "five_factor_axis_trading_intensity": {
+        "axis": "trading_intensity",
+        "label": "13-Axis Rotation · Trading Intensity",
+        "description": "Standalone trading-intensity axis (relative volume/activity).",
+    },
+    "five_factor_axis_sentiment": {
+        "axis": "sentiment",
+        "label": "13-Axis Rotation · Sentiment",
+        "description": "Standalone sentiment axis (52w proximity/price action).",
+    },
+    "five_factor_axis_fundmom": {
+        "axis": "fundmom",
+        "label": "13-Axis Rotation · Fundamental Momentum",
+        "description": "Standalone fundamental-momentum axis (margin/sales acceleration).",
+    },
+    "five_factor_axis_carry": {
+        "axis": "carry",
+        "label": "13-Axis Rotation · Carry",
+        "description": "Standalone carry axis (dividend/shareholder yield).",
+    },
+    "five_factor_axis_defensive": {
+        "axis": "defensive",
+        "label": "13-Axis Rotation · Defensive",
+        "description": "Standalone defensive axis (stability and low-beta profile).",
+    },
+}
+
+
+def _available_factor_names(engine: PortfolioEngine) -> set[str]:
+    names = set(engine.signal_configs.keys())
+    names.update(FIVE_FACTOR_AXIS_FACTORS.keys())
+    return names
+
+
 def _safe_float(value: Any) -> float | None:
     try:
         if value is None:
@@ -223,6 +298,22 @@ def _build_factor_catalog(engine: PortfolioEngine) -> list[dict[str, Any]]:
             "parameter_schema": PARAM_SCHEMAS.get(name, []),
         }
         rows.append(row)
+
+    base_five_factor_cfg = engine.signal_configs.get("five_factor_rotation", {})
+    for virtual_name, spec in FIVE_FACTOR_AXIS_FACTORS.items():
+        rows.append(
+            {
+                "name": virtual_name,
+                "label": spec["label"],
+                "description": spec["description"],
+                "rebalance_frequency": base_five_factor_cfg.get("rebalance_frequency", "monthly"),
+                "timeline": base_five_factor_cfg.get("timeline", {}),
+                "portfolio_options": base_five_factor_cfg.get("portfolio_options", {}),
+                "parameter_schema": [],
+            }
+        )
+
+    rows.sort(key=lambda row: str(row.get("name", "")))
     return rows
 
 
@@ -242,7 +333,7 @@ def _build_response(payload: dict[str, Any]) -> dict[str, Any]:
     with redirect_stdout(io.StringIO()):
         engine.load_all_data()
 
-    factors = _normalize_factor_entries(payload.get("factors"), set(engine.signal_configs.keys()))
+    factors = _normalize_factor_entries(payload.get("factors"), _available_factor_names(engine))
     factors = _normalize_weights(factors)
 
     start_date = _as_date(payload.get("start_date"), "2018-01-01")
@@ -267,22 +358,75 @@ def _build_response(payload: dict[str, Any]) -> dict[str, Any]:
     composite: pd.DataFrame | None = None
     used_factors: list[dict[str, Any]] = []
     factor_top_symbols: dict[str, list[dict[str, Any]]] = {}
+    five_factor_bundle: dict[str, Any] | None = None
+
+    def _get_five_factor_bundle(signal_params: dict[str, Any] | None = None) -> dict[str, Any]:
+        nonlocal five_factor_bundle
+        if five_factor_bundle is not None:
+            return five_factor_bundle
+
+        cfg = copy.deepcopy(engine.signal_configs.get("five_factor_rotation", {}))
+        if not cfg:
+            raise ValueError("five_factor_rotation config is required for axis factors.")
+
+        cfg["enabled"] = True
+        timeline_cfg = cfg.get("timeline", {}) if isinstance(cfg.get("timeline", {}), dict) else {}
+        timeline_cfg["start_date"] = start_date.date().isoformat()
+        timeline_cfg["end_date"] = end_date.date().isoformat()
+        cfg["timeline"] = timeline_cfg
+        if isinstance(signal_params, dict):
+            cfg["signal_params"] = signal_params
+
+        with redirect_stdout(io.StringIO()):
+            panel, details = engine._build_signals_for_factor("five_factor_rotation", engine.close_df.index, cfg)
+
+        if panel is None or panel.empty:
+            raise ValueError("five_factor_rotation returned an empty signal panel.")
+
+        axis_components: dict[str, pd.DataFrame] = {}
+        if isinstance(details, dict):
+            raw_components = details.get("axis_components", {})
+            if isinstance(raw_components, dict):
+                for axis_name, axis_panel in raw_components.items():
+                    if isinstance(axis_panel, pd.DataFrame) and not axis_panel.empty:
+                        axis_components[str(axis_name)] = axis_panel.reindex(
+                            index=engine.close_df.index,
+                            columns=engine.close_df.columns,
+                        )
+
+        five_factor_bundle = {
+            "panel": panel.reindex(index=engine.close_df.index, columns=engine.close_df.columns),
+            "axis_components": axis_components,
+        }
+        return five_factor_bundle
 
     for factor in factors:
         name = factor["name"]
         weight = float(factor["weight"])
-        cfg = copy.deepcopy(engine.signal_configs.get(name, {}))
-        cfg["enabled"] = True
+        signal_params = factor.get("signal_params", {})
 
-        timeline = cfg.get("timeline", {}) if isinstance(cfg.get("timeline", {}), dict) else {}
-        timeline["start_date"] = start_date.date().isoformat()
-        timeline["end_date"] = end_date.date().isoformat()
-        cfg["timeline"] = timeline
+        if name in FIVE_FACTOR_AXIS_FACTORS:
+            axis_name = FIVE_FACTOR_AXIS_FACTORS[name]["axis"]
+            bundle = _get_five_factor_bundle()
+            axis_panel = bundle.get("axis_components", {}).get(axis_name)
+            panel = axis_panel if isinstance(axis_panel, pd.DataFrame) else None
+        elif name == "five_factor_rotation":
+            panel = _get_five_factor_bundle(
+                signal_params if isinstance(signal_params, dict) else {}
+            ).get("panel")
+        else:
+            cfg = copy.deepcopy(engine.signal_configs.get(name, {}))
+            cfg["enabled"] = True
 
-        cfg["signal_params"] = factor.get("signal_params", {})
+            timeline = cfg.get("timeline", {}) if isinstance(cfg.get("timeline", {}), dict) else {}
+            timeline["start_date"] = start_date.date().isoformat()
+            timeline["end_date"] = end_date.date().isoformat()
+            cfg["timeline"] = timeline
 
-        with redirect_stdout(io.StringIO()):
-            panel, _ = engine._build_signals_for_factor(name, engine.close_df.index, cfg)
+            cfg["signal_params"] = signal_params if isinstance(signal_params, dict) else {}
+
+            with redirect_stdout(io.StringIO()):
+                panel, _ = engine._build_signals_for_factor(name, engine.close_df.index, cfg)
 
         if panel is None or panel.empty:
             continue
@@ -306,7 +450,7 @@ def _build_response(payload: dict[str, Any]) -> dict[str, Any]:
             {
                 "name": name,
                 "weight": round(weight, 4),
-                "signal_params": factor.get("signal_params", {}),
+                "signal_params": signal_params if isinstance(signal_params, dict) else {},
             }
         )
 
