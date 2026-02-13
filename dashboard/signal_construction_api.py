@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import io
 import json
+import hashlib
+import os
 import sys
 import time
 from contextlib import redirect_stdout
@@ -23,16 +25,15 @@ import pandas as pd
 
 
 APP_ROOT = Path(__file__).resolve().parent.parent
-PROJECT_ROOT = APP_ROOT.parent
-FETCHER_DIR = PROJECT_ROOT / "data" / "Fetcher-Scrapper"
+PROJECT_ROOT = APP_ROOT
 MODELS_SIGNALS_DIR = PROJECT_ROOT / "Models" / "signals"
 
-for candidate in (PROJECT_ROOT, FETCHER_DIR, MODELS_SIGNALS_DIR):
+for candidate in (PROJECT_ROOT, MODELS_SIGNALS_DIR):
     candidate_str = str(candidate)
     if candidate_str not in sys.path:
         sys.path.insert(0, candidate_str)
 
-from borsapy_client import BorsapyClient  # noqa: E402
+import borsapy as bp  # noqa: E402
 from Models.signals.borsapy_indicators import BorsapyIndicators  # noqa: E402
 
 
@@ -45,6 +46,28 @@ DEFAULT_INDICATORS: dict[str, dict[str, Any]] = {
     "adx": {"period": 14, "trend_threshold": 25.0},
     "supertrend": {"period": 10, "multiplier": 3.0},
 }
+
+
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except Exception:
+        return default
+    return max(minimum, value)
+
+
+DEFAULT_CACHE_DIR = (
+    Path("/tmp/bist-quant-ai-signal-cache")
+    if os.environ.get("VERCEL")
+    else PROJECT_ROOT / "data" / "cache" / "signal_construction"
+)
+CACHE_DIR = Path(os.environ.get("SIGNAL_CACHE_DIR", str(DEFAULT_CACHE_DIR)))
+PRICE_CACHE_TTL_SEC = _env_int("SIGNAL_PRICE_CACHE_TTL_SEC", 900, minimum=0)
+INDEX_CACHE_TTL_SEC = _env_int("SIGNAL_INDEX_CACHE_TTL_SEC", 21600, minimum=0)
+DOWNLOAD_BATCH_SIZE = _env_int("SIGNAL_DOWNLOAD_BATCH_SIZE", 25, minimum=1)
 
 
 def _safe_float(value: Any) -> float | None:
@@ -102,6 +125,153 @@ def _as_float(value: Any, default: float) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def _ensure_cache_dir() -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _is_cache_fresh(path: Path, ttl_seconds: int) -> bool:
+    if ttl_seconds <= 0:
+        return False
+    if not path.exists() or not path.is_file():
+        return False
+    try:
+        age_seconds = time.time() - path.stat().st_mtime
+    except Exception:
+        return False
+    return age_seconds <= ttl_seconds and path.stat().st_size > 0
+
+
+def _index_cache_path(index_name: str) -> Path:
+    safe = "".join(ch if ch.isalnum() else "_" for ch in index_name.upper())
+    return CACHE_DIR / f"index_components_{safe}.json"
+
+
+def _load_cached_index_components(index_name: str) -> list[str] | None:
+    cache_path = _index_cache_path(index_name)
+    if not _is_cache_fresh(cache_path, INDEX_CACHE_TTL_SEC):
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    symbols = payload.get("symbols") if isinstance(payload, dict) else payload
+    if not isinstance(symbols, list):
+        return None
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for symbol in symbols:
+        base = str(symbol).upper().split(".")[0]
+        if not base or base in seen:
+            continue
+        seen.add(base)
+        cleaned.append(base)
+    return cleaned or None
+
+
+def _save_cached_index_components(index_name: str, symbols: list[str]) -> None:
+    if not symbols:
+        return
+    try:
+        _ensure_cache_dir()
+        cache_path = _index_cache_path(index_name)
+        payload = {
+            "symbols": symbols,
+            "cached_at": time.time(),
+        }
+        cache_path.write_text(json.dumps(payload), encoding="utf-8")
+    except Exception:
+        # Cache write failures should never break live API flow.
+        return
+
+
+def _price_cache_path(universe: str, period: str, interval: str, symbols: list[str]) -> Path:
+    digest = hashlib.sha256(
+        json.dumps(
+            {
+                "universe": universe,
+                "period": period,
+                "interval": interval,
+                "symbols": symbols,
+            },
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    return CACHE_DIR / f"prices_{digest}.pkl"
+
+
+def _load_cached_prices(cache_path: Path, ttl_seconds: int | None) -> pd.DataFrame | None:
+    if ttl_seconds is not None:
+        if ttl_seconds <= 0:
+            return None
+        if not _is_cache_fresh(cache_path, ttl_seconds):
+            return None
+    elif not cache_path.exists():
+        return None
+
+    try:
+        df = pd.read_pickle(cache_path)
+    except Exception:
+        return None
+
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+
+    required = {"Date", "Ticker", "Open", "High", "Low", "Close", "Volume"}
+    if not required.issubset(set(df.columns)):
+        return None
+
+    return df
+
+
+def _save_cached_prices(cache_path: Path, prices: pd.DataFrame) -> None:
+    if prices.empty:
+        return
+    try:
+        _ensure_cache_dir()
+        prices.to_pickle(cache_path)
+    except Exception:
+        # Cache write failures should never break live API flow.
+        return
+
+
+def _normalize_download_to_long(raw: pd.DataFrame, symbols: list[str]) -> pd.DataFrame:
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+
+    frames: list[pd.DataFrame] = []
+    required_cols = ["Open", "High", "Low", "Close", "Volume"]
+
+    if isinstance(raw.columns, pd.MultiIndex):
+        lvl0 = raw.columns.get_level_values(0)
+        # Handle "column-first" shape by swapping levels.
+        if {"Open", "High", "Low", "Close"}.issubset(set(lvl0)):
+            raw = raw.swaplevel(0, 1, axis=1).sort_index(axis=1)
+
+        for ticker in dict.fromkeys(raw.columns.get_level_values(0)):
+            sub = raw[ticker]
+            if not isinstance(sub, pd.DataFrame) or sub.empty:
+                continue
+            sub = sub.rename_axis("Date").reset_index()
+            sub["Ticker"] = str(ticker).upper().split(".")[0]
+            for col in required_cols:
+                if col not in sub.columns:
+                    sub[col] = np.nan
+            frames.append(sub[["Date", "Ticker", *required_cols]])
+    else:
+        sub = raw.rename_axis("Date").reset_index()
+        ticker = symbols[0] if symbols else "UNKNOWN"
+        sub["Ticker"] = str(ticker).upper().split(".")[0]
+        for col in required_cols:
+            if col not in sub.columns:
+                sub[col] = np.nan
+        frames.append(sub[["Date", "Ticker", *required_cols]])
+
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
 
 
 def _parse_payload() -> dict[str, Any]:
@@ -167,6 +337,83 @@ def _resolve_runtime_config(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _get_index_components(index_name: str) -> list[str]:
+    cached = _load_cached_index_components(index_name)
+    if cached:
+        return cached
+
+    try:
+        idx = bp.index(index_name)
+    except Exception as exc:
+        raise ValueError(f"Failed to load index components for {index_name}: {exc}") from exc
+
+    symbols: list[str] = []
+    component_symbols = getattr(idx, "component_symbols", None)
+    if isinstance(component_symbols, list):
+        symbols = [str(s) for s in component_symbols if s]
+
+    if not symbols:
+        components = getattr(idx, "components", None)
+        if isinstance(components, list):
+            for item in components:
+                if isinstance(item, dict):
+                    symbol = str(item.get("symbol", "")).strip()
+                    if symbol:
+                        symbols.append(symbol)
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for symbol in symbols:
+        base = symbol.upper().split(".")[0]
+        if not base or base in seen:
+            continue
+        seen.add(base)
+        cleaned.append(base)
+
+    _save_cached_index_components(index_name, cleaned)
+    return cleaned
+
+
+def _download_to_long(symbols: list[str], period: str, interval: str) -> pd.DataFrame:
+    if not symbols:
+        return pd.DataFrame()
+
+    def _download(batch: list[str]) -> pd.DataFrame:
+        with redirect_stdout(io.StringIO()):
+            return bp.download(
+                batch,
+                period=period,
+                interval=interval,
+                group_by="ticker",
+                progress=False,
+            )
+
+    # Fast path: single call.
+    try:
+        raw = _download(symbols)
+        normalized = _normalize_download_to_long(raw, symbols)
+        if not normalized.empty:
+            return normalized
+    except Exception:
+        pass
+
+    # Robust fallback: request smaller batches and merge successful chunks.
+    frames: list[pd.DataFrame] = []
+    for i in range(0, len(symbols), DOWNLOAD_BATCH_SIZE):
+        batch = symbols[i:i + DOWNLOAD_BATCH_SIZE]
+        try:
+            raw_batch = _download(batch)
+            normalized_batch = _normalize_download_to_long(raw_batch, batch)
+            if not normalized_batch.empty:
+                frames.append(normalized_batch)
+        except Exception:
+            continue
+
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
 def _load_price_panels(
     universe: str,
     period: str,
@@ -174,30 +421,31 @@ def _load_price_panels(
     max_symbols: int,
     custom_symbols: list[str],
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    client = BorsapyClient(cache_dir=PROJECT_ROOT / "data" / "borsapy_cache")
-
     if universe == "CUSTOM":
         symbols = custom_symbols
     else:
-        symbols = client.get_index_components(universe)
+        symbols = _get_index_components(universe)
 
     symbols = [s.upper().split(".")[0] for s in symbols if s]
     if not symbols:
         raise ValueError("No symbols found for the selected universe.")
 
     symbols = symbols[:max_symbols]
+    cache_path = _price_cache_path(universe, period, interval, symbols)
+    prices = _load_cached_prices(cache_path, PRICE_CACHE_TTL_SEC)
 
-    with redirect_stdout(io.StringIO()):
-        prices = client.batch_download_to_long(
-            symbols=symbols,
-            period=period,
-            interval=interval,
-            group_by="ticker",
-            add_is_suffix=False,
-        )
-
-    if prices.empty:
-        raise ValueError("No price data returned from borsapy.")
+    if prices is None:
+        downloaded = _download_to_long(symbols=symbols, period=period, interval=interval)
+        if downloaded.empty:
+            # Robust fallback: allow stale cache if network fetch fails.
+            stale = _load_cached_prices(cache_path, ttl_seconds=None)
+            if stale is not None and not stale.empty:
+                prices = stale
+            else:
+                raise ValueError("No price data returned from borsapy.")
+        else:
+            prices = downloaded
+            _save_cached_prices(cache_path, downloaded)
 
     for col in ("Date", "Ticker", "Open", "High", "Low", "Close", "Volume"):
         if col not in prices.columns:
@@ -369,7 +617,11 @@ def _build_signal_panel_for_indicator(
             multiplier=multiplier,
             output="direction",
         )
-        signal_panel = panel.fillna(0.0).applymap(lambda x: 1 if x > 0 else (-1 if x < 0 else 0)).astype("int64")
+        filled = panel.fillna(0.0)
+        signal_panel = (
+            filled.gt(0).astype("int64")
+            - filled.lt(0).astype("int64")
+        )
         return panel, signal_panel
 
     raise ValueError(f"Unsupported indicator: {name}")
@@ -557,6 +809,47 @@ def _calculate_performance_metrics(
     }
 
 
+def _build_portfolio_and_benchmark_returns(
+    returns_df: pd.DataFrame,
+    lagged_actions: pd.DataFrame,
+    lagged_scores: pd.DataFrame,
+    max_positions: int,
+) -> tuple[pd.Series, pd.Series]:
+    """
+    Vectorized daily portfolio construction:
+    - Select lagged BUY universe
+    - Pick top-N by lagged combined score
+    - Equal-weight selected names
+    """
+    aligned_actions = lagged_actions.reindex_like(returns_df).fillna(0).astype("int8")
+    aligned_scores = lagged_scores.reindex_like(returns_df).astype("float64")
+
+    eligible = (aligned_actions == 1) & aligned_scores.notna()
+
+    # Rank BUY-eligible scores cross-sectionally by date.
+    ranked_scores = aligned_scores.where(eligible, np.nan).rank(
+        axis=1,
+        ascending=False,
+        method="first",
+    )
+    selected_mask = eligible & ranked_scores.le(max_positions)
+
+    selected_counts = selected_mask.sum(axis=1)
+    weighted_sum = returns_df.where(selected_mask, 0.0).sum(axis=1)
+    portfolio_series = weighted_sum.div(selected_counts.replace(0, np.nan)).fillna(0.0)
+    benchmark_series = returns_df.mean(axis=1).fillna(0.0)
+
+    # Keep behavior equivalent to prior implementation (starts from second row).
+    if len(portfolio_series) > 1:
+        portfolio_series = portfolio_series.iloc[1:]
+        benchmark_series = benchmark_series.iloc[1:]
+    else:
+        portfolio_series = pd.Series(dtype="float64")
+        benchmark_series = pd.Series(dtype="float64")
+
+    return portfolio_series.astype("float64"), benchmark_series.astype("float64")
+
+
 def _build_backtest_response(payload: dict[str, Any]) -> dict[str, Any]:
     started = time.perf_counter()
     runtime = _resolve_runtime_config(payload)
@@ -629,32 +922,12 @@ def _build_backtest_response(payload: dict[str, Any]) -> dict[str, Any]:
     lagged_actions = action_df.shift(1).fillna(0).astype("int64")
     lagged_scores = combined_score_df.shift(1)
 
-    portfolio_returns: list[float] = []
-    benchmark_returns: list[float] = []
-    dates: list[pd.Timestamp] = []
-
-    for date in returns_df.index[1:]:
-        day_actions = lagged_actions.loc[date]
-        day_scores = lagged_scores.loc[date]
-
-        buy_scores = day_scores[day_actions == 1].dropna().sort_values(ascending=False)
-        selected = list(buy_scores.head(max_positions).index) if len(buy_scores) else []
-
-        if selected:
-            day_port_rets = returns_df.loc[date, selected].dropna()
-            day_port_ret = float(day_port_rets.mean()) if len(day_port_rets) else 0.0
-        else:
-            day_port_ret = 0.0
-
-        day_bench_rets = returns_df.loc[date].dropna()
-        day_bench_ret = float(day_bench_rets.mean()) if len(day_bench_rets) else 0.0
-
-        dates.append(date)
-        portfolio_returns.append(day_port_ret)
-        benchmark_returns.append(day_bench_ret)
-
-    portfolio_series = pd.Series(portfolio_returns, index=pd.DatetimeIndex(dates), dtype="float64")
-    benchmark_series = pd.Series(benchmark_returns, index=pd.DatetimeIndex(dates), dtype="float64")
+    portfolio_series, benchmark_series = _build_portfolio_and_benchmark_returns(
+        returns_df=returns_df,
+        lagged_actions=lagged_actions,
+        lagged_scores=lagged_scores,
+        max_positions=max_positions,
+    )
 
     metrics = _calculate_performance_metrics(portfolio_series, benchmark_series)
     equity = metrics.get("equity", pd.Series(dtype="float64"))

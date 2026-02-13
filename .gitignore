@@ -70,6 +70,7 @@
 
 # Generated app/runtime data
 dashboard/dashboard_data.json
+data/cache/
 Regime\ Filter/outputs/
 
 # ===================

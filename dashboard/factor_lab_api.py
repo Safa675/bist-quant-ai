@@ -25,7 +25,7 @@ import pandas as pd
 
 
 APP_ROOT = Path(__file__).resolve().parent.parent
-PROJECT_ROOT = APP_ROOT.parent
+PROJECT_ROOT = APP_ROOT
 MODELS_DIR = PROJECT_ROOT / "Models"
 
 for candidate in (PROJECT_ROOT, MODELS_DIR):

@@ -1,7 +1,5 @@
 "use client";
 
-import { useState } from "react";
-
 interface Props {
     holdings: Record<string, string[]>;
     selectedSignal: string;

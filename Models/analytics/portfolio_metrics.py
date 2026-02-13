@@ -31,20 +31,12 @@ Usage:
     )
 """
 
-from pathlib import Path
 from datetime import datetime
 from typing import Optional, Union
-import sys
 
 import numpy as np
 import pandas as pd
 from scipy import stats
-
-# Add project paths
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-FETCHER_DIR = PROJECT_ROOT / "data" / "Fetcher-Scrapper"
-if str(FETCHER_DIR) not in sys.path:
-    sys.path.insert(0, str(FETCHER_DIR))
 
 # Check borsapy availability
 try:

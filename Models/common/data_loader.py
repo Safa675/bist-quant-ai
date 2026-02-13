@@ -18,11 +18,6 @@ import sys
 
 warnings.filterwarnings('ignore')
 
-# Add Fetcher-Scrapper to path for borsapy_client import
-FETCHER_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "Fetcher-Scrapper"
-if str(FETCHER_DIR) not in sys.path:
-    sys.path.insert(0, str(FETCHER_DIR))
-
 # Regime filter directory candidates (support both naming schemes)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 REGIME_DIR_CANDIDATES = [
@@ -64,23 +59,81 @@ class DataLoader:
     @property
     def borsapy(self):
         """
-        Lazy-load borsapy client.
+        Lazy-load borsapy module.
 
         Returns:
-            BorsapyClient instance or None if not available
+            borsapy module or None if not available
         """
         if self._borsapy_client is None:
             try:
-                from borsapy_client import BorsapyClient
-                self._borsapy_client = BorsapyClient(
-                    cache_dir=self.data_dir / "borsapy_cache"
-                )
-                print("  ✅ Borsapy client initialized")
+                import borsapy as bp
+                self._borsapy_client = bp
+                print("  ✅ Borsapy module initialized")
             except ImportError as e:
                 print(f"  ⚠️  Borsapy not available: {e}")
                 print("     Install with: pip install borsapy")
                 return None
         return self._borsapy_client
+
+    def _borsapy_download_to_long(
+        self,
+        symbols: list[str],
+        period: str = "5y",
+        interval: str = "1d",
+    ) -> pd.DataFrame:
+        """
+        Download prices via borsapy and normalize into long format.
+        """
+        bp = self.borsapy
+        if bp is None or not symbols:
+            return pd.DataFrame()
+
+        try:
+            raw = bp.download(
+                symbols,
+                period=period,
+                interval=interval,
+                group_by="ticker",
+                progress=False,
+            )
+        except Exception as e:
+            print(f"  ⚠️  Failed to download prices from borsapy: {e}")
+            return pd.DataFrame()
+
+        if raw is None or raw.empty:
+            return pd.DataFrame()
+
+        required_cols = ["Open", "High", "Low", "Close", "Volume"]
+        frames: list[pd.DataFrame] = []
+
+        if isinstance(raw.columns, pd.MultiIndex):
+            lvl0 = raw.columns.get_level_values(0)
+            # Handle "column-first" shape by swapping levels.
+            if {"Open", "High", "Low", "Close"}.issubset(set(lvl0)):
+                raw = raw.swaplevel(0, 1, axis=1).sort_index(axis=1)
+
+            for ticker in dict.fromkeys(raw.columns.get_level_values(0)):
+                sub = raw[ticker]
+                if not isinstance(sub, pd.DataFrame) or sub.empty:
+                    continue
+                sub = sub.rename_axis("Date").reset_index()
+                sub["Ticker"] = str(ticker).upper().split(".")[0]
+                for col in required_cols:
+                    if col not in sub.columns:
+                        sub[col] = pd.NA
+                frames.append(sub[["Date", "Ticker", *required_cols]])
+        else:
+            sub = raw.rename_axis("Date").reset_index()
+            ticker = symbols[0]
+            sub["Ticker"] = str(ticker).upper().split(".")[0]
+            for col in required_cols:
+                if col not in sub.columns:
+                    sub[col] = pd.NA
+            frames.append(sub[["Date", "Ticker", *required_cols]])
+
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
 
     def load_prices_borsapy(
         self,
@@ -106,15 +159,10 @@ class DataLoader:
         print(f"\n📊 Loading prices via borsapy (period={period})...")
 
         if symbols is None:
-            symbols = self.borsapy.get_index_components(index)
+            symbols = self.get_index_components_borsapy(index)
             print(f"  Using {len(symbols)} symbols from {index}")
 
-        result = self.borsapy.batch_download_to_long(
-            symbols=symbols,
-            period=period,
-            group_by="ticker",
-            add_is_suffix=False,
-        )
+        result = self._borsapy_download_to_long(symbols=symbols, period=period, interval="1d")
 
         if result.empty:
             print("  ⚠️  No data returned from borsapy")
@@ -136,7 +184,31 @@ class DataLoader:
         """
         if self.borsapy is None:
             return []
-        return self.borsapy.get_index_components(index)
+        try:
+            idx = self.borsapy.index(index)
+        except Exception as e:
+            print(f"  ⚠️  Failed to load index components for {index}: {e}")
+            return []
+
+        symbols = getattr(idx, "component_symbols", None)
+        if isinstance(symbols, list) and symbols:
+            return [str(s).upper().split(".")[0] for s in symbols if s]
+
+        components = getattr(idx, "components", None)
+        if isinstance(components, list):
+            out: list[str] = []
+            seen: set[str] = set()
+            for item in components:
+                if not isinstance(item, dict):
+                    continue
+                symbol = str(item.get("symbol", "")).upper().split(".")[0]
+                if not symbol or symbol in seen:
+                    continue
+                seen.add(symbol)
+                out.append(symbol)
+            return out
+
+        return []
 
     def get_financials_borsapy(self, symbol: str) -> dict[str, pd.DataFrame]:
         """
@@ -150,13 +222,30 @@ class DataLoader:
         """
         if self.borsapy is None:
             return {}
-        return self.borsapy.get_financials(symbol)
+
+        ticker = self.borsapy.Ticker(symbol)
+        out: dict[str, pd.DataFrame] = {}
+        for key, attr in (
+            ("balance_sheet", "balance_sheet"),
+            ("income_stmt", "income_stmt"),
+            ("cashflow", "cashflow"),
+        ):
+            try:
+                value = getattr(ticker, attr)
+                out[key] = value if isinstance(value, pd.DataFrame) else pd.DataFrame()
+            except Exception:
+                out[key] = pd.DataFrame()
+        return out
 
     def get_dividends_borsapy(self, symbol: str) -> pd.DataFrame:
         """Get dividend history via borsapy."""
         if self.borsapy is None:
             return pd.DataFrame()
-        return self.borsapy.get_dividends(symbol)
+        try:
+            value = self.borsapy.Ticker(symbol).dividends
+            return value if isinstance(value, pd.DataFrame) else pd.DataFrame()
+        except Exception:
+            return pd.DataFrame()
 
     def get_fast_info_borsapy(self, symbol: str) -> dict:
         """
@@ -170,7 +259,11 @@ class DataLoader:
         """
         if self.borsapy is None:
             return {}
-        return self.borsapy.get_fast_info(symbol)
+        try:
+            info = self.borsapy.Ticker(symbol).fast_info
+            return dict(info)
+        except Exception:
+            return {}
 
     def screen_stocks_borsapy(self, **filters) -> pd.DataFrame:
         """
@@ -184,7 +277,10 @@ class DataLoader:
         """
         if self.borsapy is None:
             return pd.DataFrame()
-        return self.borsapy.screen_stocks(**filters)
+        try:
+            return self.borsapy.screen_stocks(**filters)
+        except Exception:
+            return pd.DataFrame()
 
     def get_history_with_indicators_borsapy(
         self,
@@ -205,9 +301,13 @@ class DataLoader:
         """
         if self.borsapy is None:
             return pd.DataFrame()
-        return self.borsapy.get_history_with_indicators(
-            symbol, indicators=indicators, period=period
-        )
+        try:
+            return self.borsapy.Ticker(symbol).history_with_indicators(
+                period=period,
+                indicators=indicators,
+            )
+        except Exception:
+            return pd.DataFrame()
 
     # -------------------------------------------------------------------------
     # Portfolio Analytics Integration

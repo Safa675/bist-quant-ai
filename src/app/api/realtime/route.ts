@@ -6,37 +6,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // Path to the Python realtime API script
-const PYTHON_SCRIPT = path.resolve(
-    process.cwd(),
-    "..",
-    "data",
-    "Fetcher-Scrapper",
-    "realtime_api.py"
-);
-
-interface QuoteData {
-    symbol: string;
-    last_price?: number;
-    change?: number;
-    change_pct?: number;
-    volume?: number;
-    bid?: number;
-    ask?: number;
-    high?: number;
-    low?: number;
-    open?: number;
-    prev_close?: number;
-    market_cap?: number;
-    timestamp?: string;
-    error?: string;
-}
-
-interface QuotesResponse {
-    quotes: Record<string, QuoteData>;
-    count: number;
-    timestamp?: string;
-    error?: string;
-}
+const PYTHON_SCRIPT = path.resolve(process.cwd(), "api", "realtime_api.py");
 
 /**
  * Execute Python script and return JSON result
@@ -51,22 +21,28 @@ async function executePythonScript(
             pythonArgs.push(args);
         }
 
-        const process = spawn("python3", pythonArgs, {
+        const child = spawn("python3", pythonArgs, {
             cwd: path.dirname(PYTHON_SCRIPT),
         });
 
         let stdout = "";
         let stderr = "";
 
-        process.stdout.on("data", (data) => {
+        child.stdout.on("data", (data) => {
             stdout += data.toString();
         });
 
-        process.stderr.on("data", (data) => {
+        child.stderr.on("data", (data) => {
             stderr += data.toString();
         });
 
-        process.on("close", (code) => {
+        const timeoutHandle = setTimeout(() => {
+            child.kill();
+            reject(new Error("Python script timeout"));
+        }, 30000);
+
+        child.on("close", (code) => {
+            clearTimeout(timeoutHandle);
             if (code !== 0) {
                 reject(new Error(`Python script failed: ${stderr || "Unknown error"}`));
                 return;
@@ -80,15 +56,10 @@ async function executePythonScript(
             }
         });
 
-        process.on("error", (err) => {
+        child.on("error", (err) => {
+            clearTimeout(timeoutHandle);
             reject(new Error(`Failed to spawn Python: ${err.message}`));
         });
-
-        // Timeout after 30 seconds
-        setTimeout(() => {
-            process.kill();
-            reject(new Error("Python script timeout"));
-        }, 30000);
     });
 }
 
@@ -200,7 +171,7 @@ export async function POST(request: NextRequest) {
             cost_basis: cost_basis || {},
         });
 
-        const result = await executePythonScript("portfolio", JSON.stringify(holdings));
+        const result = await executePythonScript("portfolio", portfolioData);
 
         return NextResponse.json(result, {
             headers: {

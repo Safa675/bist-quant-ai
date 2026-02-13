@@ -21,7 +21,7 @@ import pandas as pd
 
 SCRIPT_FILE = Path(__file__).resolve()
 DASHBOARD_DIR = SCRIPT_FILE.parent
-PROJECT_ROOT = DASHBOARD_DIR.parent.parent
+PROJECT_ROOT = DASHBOARD_DIR.parent
 MODELS_DIR = PROJECT_ROOT / "Models"
 DATA_DIR = PROJECT_ROOT / "data"
 RESULTS_DIR_CANDIDATES = [
@@ -34,7 +34,7 @@ LEGACY_REGIME_OUTPUTS_DIR = PROJECT_ROOT / "Regime Filter" / "outputs"
 MANUAL_HOLDINGS_FILE = DASHBOARD_DIR / "manual_portfolio_holdings.csv"
 MANUAL_TRADES_FILE = DASHBOARD_DIR / "manual_trades.csv"
 MANUAL_PORTFOLIO_DAILY_FILE = DASHBOARD_DIR / "manual_portfolio_daily.csv"
-PUBLIC_DASHBOARD_FILE = PROJECT_ROOT / "bist-quant-ai" / "public" / "data" / "dashboard_data.json"
+PUBLIC_DASHBOARD_FILE = PROJECT_ROOT / "public" / "data" / "dashboard_data.json"
 
 
 def _resolve_results_dir():

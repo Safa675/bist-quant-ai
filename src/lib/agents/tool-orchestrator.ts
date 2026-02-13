@@ -148,7 +148,7 @@ export async function generateResearchResponse(
         },
     ];
 
-    let totalUsage: AzureUsage = {
+    const totalUsage: AzureUsage = {
         promptTokens: null,
         completionTokens: null,
         totalTokens: null,
@@ -260,9 +260,8 @@ export async function generateResearchResponse(
         }
 
         // Process tool calls
-        const assistantMessage: { role: string; content: string | null; tool_calls: ToolCall[] } = {
+        const assistantMessage: { role: string; content?: string; tool_calls: ToolCall[] } = {
             role: "assistant",
-            content: null,
             tool_calls: toolCalls,
         };
         messages.push(assistantMessage);
