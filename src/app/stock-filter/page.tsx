@@ -18,12 +18,13 @@ interface StockFilterMeta {
     recommendations: string[];
     default_sort_by: string;
     default_sort_desc: boolean;
+    filter_mode?: string;
     error?: string;
 }
 
 interface FilterBound {
-    min: string;
-    max: string;
+    minPct: string;
+    maxPct: string;
 }
 
 type FilterBoundState = Record<string, FilterBound>;
@@ -49,6 +50,12 @@ interface StockFilterResult {
         label: string;
         min: number | null;
         max: number | null;
+    }>;
+    applied_percentile_filters?: Array<{
+        key: string;
+        label: string;
+        min_pct: number | null;
+        max_pct: number | null;
     }>;
     error?: string;
 }
@@ -108,7 +115,7 @@ export default function StockFilterPage() {
 
                 const initialBounds: FilterBoundState = {};
                 for (const field of data.filters || []) {
-                    initialBounds[field.key] = { min: "", max: "" };
+                    initialBounds[field.key] = { minPct: "", maxPct: "" };
                 }
                 setBounds(initialBounds);
             } catch (err) {
@@ -129,11 +136,11 @@ export default function StockFilterPage() {
         return Array.from(groups.entries());
     }, [meta]);
 
-    const updateBound = (key: string, side: "min" | "max", value: string) => {
+    const updateBound = (key: string, side: "minPct" | "maxPct", value: string) => {
         setBounds((prev) => ({
             ...prev,
             [key]: {
-                ...(prev[key] || { min: "", max: "" }),
+                ...(prev[key] || { minPct: "", maxPct: "" }),
                 [side]: value,
             },
         }));
@@ -143,7 +150,7 @@ export default function StockFilterPage() {
         setBounds((prev) => {
             const next: FilterBoundState = {};
             for (const key of Object.keys(prev)) {
-                next[key] = { min: "", max: "" };
+                next[key] = { minPct: "", maxPct: "" };
             }
             return next;
         });
@@ -155,15 +162,18 @@ export default function StockFilterPage() {
         setRunError(null);
 
         try {
-            const filters = Object.entries(bounds).reduce((acc, [key, value]) => {
-                const min = parseOptionalNumber(value.min);
-                const max = parseOptionalNumber(value.max);
-                if (min === null && max === null) {
+            const percentileFilters = Object.entries(bounds).reduce((acc, [key, value]) => {
+                const minPct = parseOptionalNumber(value.minPct);
+                const maxPct = parseOptionalNumber(value.maxPct);
+                if (minPct === null && maxPct === null) {
                     return acc;
                 }
-                acc[key] = { min, max };
+                acc[key] = {
+                    min_pct: minPct === null ? null : Math.max(0, Math.min(100, minPct)),
+                    max_pct: maxPct === null ? null : Math.max(0, Math.min(100, maxPct)),
+                };
                 return acc;
-            }, {} as Record<string, { min: number | null; max: number | null }>);
+            }, {} as Record<string, { min_pct: number | null; max_pct: number | null }>);
 
             const payload = {
                 template,
@@ -173,7 +183,7 @@ export default function StockFilterPage() {
                 sort_by: sortBy,
                 sort_desc: sortDesc,
                 limit,
-                filters,
+                percentile_filters: percentileFilters,
             };
 
             const response = await fetch("/api/stock-filter", {
@@ -206,7 +216,7 @@ export default function StockFilterPage() {
                                 Stock Filter
                             </h1>
                             <p style={{ margin: "4px 0 0", color: "var(--text-secondary)", fontSize: "0.85rem" }}>
-                                Manual BIST screener with fundamentals and valuation filters powered by <code>borsapy</code>.
+                                Manual BIST screener with relative percentile filters in your selected universe, powered by <code>borsapy</code>.
                             </p>
                         </div>
                         <Link href="/signal-lab" style={secondaryBtn}>
@@ -301,7 +311,10 @@ export default function StockFilterPage() {
 
                     {(groupedFields.length > 0) && (
                         <div className="glass-card" style={{ padding: 12, marginBottom: 10 }}>
-                            <h2 style={{ margin: "0 0 8px", fontSize: "0.95rem" }}>Fundamental Filters</h2>
+                            <h2 style={{ margin: "0 0 4px", fontSize: "0.95rem" }}>Fundamental Percentile Filters</h2>
+                            <p style={{ margin: "0 0 8px", color: "var(--text-muted)", fontSize: "0.78rem" }}>
+                                Use 0-100 percentile ranks inside your selected index/sector universe. Example: set P/B max to 10 for lowest-decile P/B stocks.
+                            </p>
 
                             <div style={{ display: "grid", gap: 10 }}>
                                 {groupedFields.map(([group, fields]) => (
@@ -311,23 +324,27 @@ export default function StockFilterPage() {
                                         </div>
                                         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 8 }}>
                                             {fields.map((field) => {
-                                                const bound = bounds[field.key] || { min: "", max: "" };
+                                                const bound = bounds[field.key] || { minPct: "", maxPct: "" };
                                                 return (
                                                     <div key={field.key} style={{ border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm)", padding: 8 }}>
                                                         <div style={{ fontSize: "0.8rem", color: "var(--text-secondary)", marginBottom: 6 }}>{field.label}</div>
                                                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
                                                             <input
                                                                 type="number"
-                                                                value={bound.min}
-                                                                onChange={(e) => updateBound(field.key, "min", e.target.value)}
-                                                                placeholder="min"
+                                                                min={0}
+                                                                max={100}
+                                                                value={bound.minPct}
+                                                                onChange={(e) => updateBound(field.key, "minPct", e.target.value)}
+                                                                placeholder="min %ile"
                                                                 style={inputStyle}
                                                             />
                                                             <input
                                                                 type="number"
-                                                                value={bound.max}
-                                                                onChange={(e) => updateBound(field.key, "max", e.target.value)}
-                                                                placeholder="max"
+                                                                min={0}
+                                                                max={100}
+                                                                value={bound.maxPct}
+                                                                onChange={(e) => updateBound(field.key, "maxPct", e.target.value)}
+                                                                placeholder="max %ile"
                                                                 style={inputStyle}
                                                             />
                                                         </div>
@@ -361,16 +378,16 @@ export default function StockFilterPage() {
                                         Sort: {result.meta.sort_by} {result.meta.sort_desc ? "desc" : "asc"}
                                     </span>
                                     <span className="badge" style={{ background: "var(--bg-secondary)" }}>
-                                        Applied filters: {result.applied_filters.length}
+                                        Applied percentile filters: {result.applied_percentile_filters?.length ?? 0}
                                     </span>
                                 </div>
                             </div>
 
-                            {result.applied_filters.length > 0 && (
+                            {(result.applied_percentile_filters && result.applied_percentile_filters.length > 0) && (
                                 <div style={{ marginBottom: 10, display: "flex", gap: 6, flexWrap: "wrap" }}>
-                                    {result.applied_filters.map((filter) => (
+                                    {result.applied_percentile_filters.map((filter) => (
                                         <span key={filter.key} className="badge" style={{ background: "var(--accent-cyan-dim)", color: "var(--accent-cyan)" }}>
-                                            {filter.label}: {filter.min ?? "-∞"} → {filter.max ?? "+∞"}
+                                            {filter.label}: {filter.min_pct ?? 0}% → {filter.max_pct ?? 100}%
                                         </span>
                                     ))}
                                 </div>

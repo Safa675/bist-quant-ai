@@ -155,6 +155,36 @@ def _normalize_filters(raw: Any, allowed: set[str]) -> dict[str, dict[str, float
     return out
 
 
+def _normalize_percentile_filters(raw: Any, allowed: set[str]) -> dict[str, dict[str, float | None]]:
+    out: dict[str, dict[str, float | None]] = {}
+    if not isinstance(raw, dict):
+        return out
+
+    for key, value in raw.items():
+        name = str(key).strip()
+        if not name or name not in allowed:
+            continue
+        if not isinstance(value, dict):
+            continue
+
+        minimum = _as_float(value.get("min_pct"))
+        maximum = _as_float(value.get("max_pct"))
+
+        if minimum is None and maximum is None:
+            continue
+
+        if minimum is not None:
+            minimum = max(0.0, min(100.0, minimum))
+        if maximum is not None:
+            maximum = max(0.0, min(100.0, maximum))
+        if minimum is not None and maximum is not None and minimum > maximum:
+            minimum, maximum = maximum, minimum
+
+        out[name] = {"min_pct": minimum, "max_pct": maximum}
+
+    return out
+
+
 def _friendly_error(exc: Exception) -> str:
     message = str(exc)
     if "CERTIFICATE_VERIFY_FAILED" in message:
@@ -174,6 +204,7 @@ def _meta_response() -> dict[str, Any]:
         "recommendations": RECOMMENDATION_OPTIONS,
         "default_sort_by": "upside_potential",
         "default_sort_desc": True,
+        "filter_mode": "percentile",
     }
 
 
@@ -208,7 +239,9 @@ def _run_response(payload: dict[str, Any]) -> dict[str, Any]:
         screener.set_recommendation(recommendation)
 
     filters = _normalize_filters(payload.get("filters"), allowed_filters)
+    percentile_filters = _normalize_percentile_filters(payload.get("percentile_filters"), allowed_filters)
     applied_filters: list[dict[str, Any]] = []
+    applied_percentile_filters: list[dict[str, Any]] = []
 
     for key, bounds in filters.items():
         minimum = bounds.get("min")
@@ -242,6 +275,36 @@ def _run_response(payload: dict[str, Any]) -> dict[str, Any]:
 
     if rename_map:
         df = df.rename(columns=rename_map)
+
+    if percentile_filters and not df.empty:
+        keep_mask = pd.Series(True, index=df.index, dtype=bool)
+        for key, bounds in percentile_filters.items():
+            if key not in df.columns:
+                continue
+
+            values = pd.to_numeric(df[key], errors="coerce")
+            pct_rank = values.rank(pct=True, method="average") * 100.0
+            field_mask = pct_rank.notna()
+
+            min_pct = bounds.get("min_pct")
+            max_pct = bounds.get("max_pct")
+
+            if min_pct is not None:
+                field_mask = field_mask & (pct_rank >= min_pct)
+            if max_pct is not None:
+                field_mask = field_mask & (pct_rank <= max_pct)
+
+            keep_mask = keep_mask & field_mask
+            applied_percentile_filters.append(
+                {
+                    "key": key,
+                    "label": FIELD_LABELS.get(key, key),
+                    "min_pct": min_pct,
+                    "max_pct": max_pct,
+                }
+            )
+
+        df = df.loc[keep_mask]
 
     sort_by = str(payload.get("sort_by") or "upside_potential").strip()
     sort_desc = _safe_bool(payload.get("sort_desc"), default=True)
@@ -300,6 +363,7 @@ def _run_response(payload: dict[str, Any]) -> dict[str, Any]:
         ],
         "rows": rows,
         "applied_filters": applied_filters,
+        "applied_percentile_filters": applied_percentile_filters,
     }
 
 

@@ -21,6 +21,7 @@ export interface StockFilterPayload {
     limit?: number;
     columns?: string[];
     filters?: Record<string, { min?: number | null; max?: number | null }>;
+    percentile_filters?: Record<string, { min_pct?: number | null; max_pct?: number | null }>;
 }
 
 function asErrorMessage(err: unknown): string {
