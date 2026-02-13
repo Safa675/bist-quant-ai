@@ -70,7 +70,13 @@ Tool usage policy:
 Available screening presets: value_stocks, growth_stocks, high_dividend, low_pe, high_momentum, oversold, overbought, breakout, undervalued, quality, small_cap, large_cap
 Available scan types: oversold, overbought, macd_bullish, macd_bearish, supertrend_buy, supertrend_sell, golden_cross, death_cross`;
 
-const MAX_TOOL_ITERATIONS = 5;
+const DEFAULT_MAX_TOOL_ITERATIONS = 8;
+const AGENT_MAX_TOOL_ITERATIONS: Record<ToolEnabledAgentType, number> = {
+    research: 10,
+    portfolio: 8,
+    risk: 8,
+    analyst: 8,
+};
 const DEFAULT_MAX_RETRIES = 2;
 const RETRY_DELAY_MS = 1000;
 const MAX_CONSECUTIVE_ALL_TOOL_FAILURES = 2;
@@ -185,7 +191,7 @@ export async function generateToolEnabledAgentResponse(
 
     const contextStr = buildContext(context);
     const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
-    const maxIterations = options.maxToolCalls ?? MAX_TOOL_ITERATIONS;
+    const maxIterations = options.maxToolCalls ?? AGENT_MAX_TOOL_ITERATIONS[agent] ?? DEFAULT_MAX_TOOL_ITERATIONS;
     const toolDefinitions = await getBorsaMcpToolDefinitions(options.requestId);
 
     const toolsUsed: string[] = [];
