@@ -153,11 +153,11 @@ export default function DashboardPage() {
                             </div>
                         </div>
                         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                            <Link href="/factor-lab" style={{ border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm)", padding: "9px 14px", fontSize: "0.82rem", color: "var(--text-primary)", textDecoration: "none", background: "var(--bg-secondary)" }}>
-                                Factor Lab
+                            <Link href="/stock-filter" style={{ border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm)", padding: "9px 14px", fontSize: "0.82rem", color: "var(--text-primary)", textDecoration: "none", background: "var(--bg-secondary)" }}>
+                                Stock Filter
                             </Link>
-                            <Link href="/signal-construction" className="btn-primary" style={{ padding: "10px 16px", fontSize: "0.82rem" }}>
-                                Build Signals
+                            <Link href="/signal-lab" className="btn-primary" style={{ padding: "10px 16px", fontSize: "0.82rem" }}>
+                                Open Signal Lab
                             </Link>
                         </div>
                     </div>

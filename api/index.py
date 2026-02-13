@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 ROOT = Path(__file__).resolve().parent.parent
 FACTOR_MODULE_PATH = ROOT / "dashboard" / "factor_lab_api.py"
 SIGNAL_MODULE_PATH = ROOT / "dashboard" / "signal_construction_api.py"
+STOCK_FILTER_MODULE_PATH = ROOT / "dashboard" / "stock_filter_api.py"
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -41,6 +42,7 @@ def _load_module(name: str, path: Path):
 # Lazy load modules to reduce cold start time
 _factor_lab_api = None
 _signal_construction_api = None
+_stock_filter_api = None
 
 
 def get_factor_lab_api():
@@ -55,6 +57,13 @@ def get_signal_construction_api():
     if _signal_construction_api is None:
         _signal_construction_api = _load_module("signal_construction_api", SIGNAL_MODULE_PATH)
     return _signal_construction_api
+
+
+def get_stock_filter_api():
+    global _stock_filter_api
+    if _stock_filter_api is None:
+        _stock_filter_api = _load_module("stock_filter_api", STOCK_FILTER_MODULE_PATH)
+    return _stock_filter_api
 
 
 # Create FastAPI app
@@ -104,6 +113,7 @@ async def root() -> JSONResponse:
             "/api/health",
             "/api/factor_lab",
             "/api/signal_construction",
+            "/api/stock_filter",
         ]
     })
 
@@ -216,6 +226,52 @@ async def post_signal_run(request: Request) -> JSONResponse:
             with redirect_stdout(io.StringIO()):
                 response = signal_construction_api._build_response(payload)
 
+        return JSONResponse(response)
+    except ValueError as exc:
+        return _error(str(exc), status_code=400)
+    except Exception as exc:
+        return _error(str(exc), status_code=500)
+
+
+# ====================
+# Stock Filter API
+# ====================
+
+@app.get("/api/stock_filter")
+@app.get("/py-api/api/stock_filter")
+async def get_stock_filter_meta() -> JSONResponse:
+    """Get templates/filter fields for stock screening."""
+    try:
+        stock_filter_api = get_stock_filter_api()
+        with redirect_stdout(io.StringIO()):
+            response = stock_filter_api._meta_response()
+        return JSONResponse(response)
+    except Exception as exc:
+        return _error(str(exc), status_code=500)
+
+
+@app.post("/api/stock_filter")
+@app.post("/py-api/api/stock_filter")
+async def post_stock_filter_run(request: Request) -> JSONResponse:
+    """Run stock screener with filters."""
+    try:
+        payload: Any = await request.json()
+    except Exception:
+        return _error("Request body must be valid JSON.")
+
+    if not isinstance(payload, dict):
+        return _error("Request body must be a JSON object.")
+
+    mode = str(payload.get("_mode", "run")).strip().lower()
+
+    try:
+        stock_filter_api = get_stock_filter_api()
+        if mode == "meta":
+            with redirect_stdout(io.StringIO()):
+                response = stock_filter_api._meta_response()
+        else:
+            with redirect_stdout(io.StringIO()):
+                response = stock_filter_api._run_response(payload)
         return JSONResponse(response)
     except ValueError as exc:
         return _error(str(exc), status_code=400)

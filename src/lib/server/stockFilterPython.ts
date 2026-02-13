@@ -1,28 +1,26 @@
 import { spawn } from "child_process";
 import path from "path";
 
-const PYTHON_SCRIPT = path.resolve(process.cwd(), "dashboard", "factor_lab_api.py");
-const REMOTE_ENGINE_URL = (process.env.FACTOR_ENGINE_URL || "").trim();
+const PYTHON_SCRIPT = path.resolve(process.cwd(), "dashboard", "stock_filter_api.py");
+const REMOTE_ENGINE_URL = (process.env.STOCK_FILTER_ENGINE_URL || "").trim();
 
-const LOCAL_PY_API_PATHS = [
-    "/py-api/api/factor_lab",
-    "/api/factor_lab",
-    "/api/index.py/api/factor_lab",
+const LOCAL_STOCK_FILTER_API_PATHS = [
+    "/py-api/api/stock_filter",
+    "/api/stock_filter",
+    "/api/index.py/api/stock_filter",
 ];
 
-export interface FactorLabPayload {
-    _mode?: "catalog" | "run";
-    start_date?: string;
-    end_date?: string;
-    rebalance_frequency?: string;
-    top_n?: number;
-    factors?: Array<{
-        name: string;
-        enabled?: boolean;
-        weight?: number;
-        signal_params?: Record<string, unknown>;
-    }>;
-    portfolio_options?: Record<string, unknown>;
+export interface StockFilterPayload {
+    _mode?: "meta" | "run";
+    template?: string;
+    sector?: string;
+    index?: string;
+    recommendation?: string;
+    sort_by?: string;
+    sort_desc?: boolean;
+    limit?: number;
+    columns?: string[];
+    filters?: Record<string, { min?: number | null; max?: number | null }>;
 }
 
 function asErrorMessage(err: unknown): string {
@@ -50,7 +48,7 @@ function buildRemoteCandidates(): string[] {
     }
 
     const baseUrl = getBaseUrl();
-    for (const apiPath of LOCAL_PY_API_PATHS) {
+    for (const apiPath of LOCAL_STOCK_FILTER_API_PATHS) {
         candidates.push(`${baseUrl}${apiPath}`);
     }
 
@@ -60,7 +58,7 @@ function buildRemoteCandidates(): string[] {
 function parseJsonFromStdout(stdout: string): Record<string, unknown> {
     const trimmed = stdout.trim();
     if (!trimmed) {
-        throw new Error("Python script returned empty output.");
+        throw new Error("Python stock filter returned empty output.");
     }
 
     try {
@@ -69,7 +67,7 @@ function parseJsonFromStdout(stdout: string): Record<string, unknown> {
             return parsed as Record<string, unknown>;
         }
     } catch {
-        // Ignore; try line fallback.
+        // Ignore and fallback to line parser.
     }
 
     const lines = trimmed
@@ -92,7 +90,7 @@ function parseJsonFromStdout(stdout: string): Record<string, unknown> {
     throw new Error(`Failed to parse Python output as JSON: ${trimmed}`);
 }
 
-async function executeRemote(url: string, payload: FactorLabPayload): Promise<Record<string, unknown>> {
+async function executeRemote(url: string, payload: StockFilterPayload): Promise<Record<string, unknown>> {
     const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -101,33 +99,34 @@ async function executeRemote(url: string, payload: FactorLabPayload): Promise<Re
     });
 
     const rawText = await response.text();
-    let data: unknown = null;
+    let parsed: unknown = null;
+
     try {
-        data = JSON.parse(rawText);
+        parsed = JSON.parse(rawText);
     } catch {
         const snippet = rawText.slice(0, 180).replace(/\s+/g, " ").trim();
         throw new Error(
-            `Remote factor engine returned non-JSON response (${response.status}) from ${url}. ` +
+            `Remote stock filter returned non-JSON response (${response.status}) from ${url}. ` +
             `Body starts with: ${snippet || "(empty)"}`
         );
     }
 
-    if (!data || typeof data !== "object" || Array.isArray(data)) {
-        throw new Error(`Remote factor engine response must be a JSON object (${url}).`);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error(`Remote stock filter response must be a JSON object (${url}).`);
     }
 
-    const result = data as Record<string, unknown>;
+    const result = parsed as Record<string, unknown>;
     if (!response.ok) {
         const msg = typeof result.error === "string"
             ? result.error
-            : `Remote factor engine failed (${response.status}) at ${url}`;
+            : `Remote stock filter failed (${response.status}) at ${url}`;
         throw new Error(msg);
     }
 
     return result;
 }
 
-async function executeLocal(payload: FactorLabPayload): Promise<Record<string, unknown>> {
+async function executeLocal(payload: StockFilterPayload): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
         const child = spawn("python3", [PYTHON_SCRIPT], {
             cwd: path.dirname(PYTHON_SCRIPT),
@@ -138,8 +137,8 @@ async function executeLocal(payload: FactorLabPayload): Promise<Record<string, u
 
         const timeout = setTimeout(() => {
             child.kill("SIGKILL");
-            reject(new Error("Factor lab timeout (300s)."));
-        }, 300_000);
+            reject(new Error("Stock filter timeout (90s)."));
+        }, 90_000);
 
         child.stdout.on("data", (chunk: Buffer) => {
             stdout += chunk.toString();
@@ -174,8 +173,10 @@ async function executeLocal(payload: FactorLabPayload): Promise<Record<string, u
     });
 }
 
-export async function executeFactorLabPython(payload: FactorLabPayload): Promise<Record<string, unknown>> {
+export async function executeStockFilterPython(payload: StockFilterPayload): Promise<Record<string, unknown>> {
     const remoteCandidates = buildRemoteCandidates();
+
+    // Always prefer local python for consistency with local codebase.
     try {
         return await executeLocal(payload);
     } catch (localErr) {
@@ -191,6 +192,6 @@ export async function executeFactorLabPython(payload: FactorLabPayload): Promise
         const details = [`local python -> ${asErrorMessage(localErr)}`, ...remoteErrors]
             .map((entry, idx) => `${idx + 1}. ${entry}`)
             .join("\n");
-        throw new Error(`Factor engine failed for all execution paths.\n${details}`);
+        throw new Error(`Stock filter engine failed for all execution paths.\n${details}`);
     }
 }

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, BarChart3, Bot, FlaskConical, SlidersHorizontal, TrendingUp } from "lucide-react";
+import { Activity, BarChart3, Bot, Filter, FlaskConical, TrendingUp } from "lucide-react";
 
 export default function Navbar() {
     const pathname = usePathname();
@@ -62,8 +62,8 @@ export default function Navbar() {
                     {[
                         { href: "/", label: "Home", icon: Activity },
                         { href: "/dashboard", label: "Dashboard", icon: BarChart3 },
-                        { href: "/signal-construction", label: "Signal Builder", icon: SlidersHorizontal },
-                        { href: "/factor-lab", label: "Factor Lab", icon: FlaskConical },
+                        { href: "/signal-lab", label: "Signal Lab", icon: FlaskConical },
+                        { href: "/stock-filter", label: "Stock Filter", icon: Filter },
                         { href: "/agents", label: "AI Agents", icon: Bot },
                     ].map((item) => (
                         <Link

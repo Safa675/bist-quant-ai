@@ -197,6 +197,11 @@ function normalizePortfolioOptions(raw: unknown): FactorPortfolioOptions {
 }
 
 export default function FactorLabPage() {
+    const [embedMode] = useState<boolean>(() => {
+        if (typeof window === "undefined") return false;
+        return new URLSearchParams(window.location.search).get("embed") === "1";
+    });
+
     const [catalog, setCatalog] = useState<FactorCatalogEntry[]>([]);
     const [loadingCatalog, setLoadingCatalog] = useState<boolean>(true);
     const [catalogError, setCatalogError] = useState<string | null>(null);
@@ -445,22 +450,28 @@ export default function FactorLabPage() {
 
     return (
         <>
-            <Navbar />
-            <main className="page-compact">
+            {!embedMode && <Navbar />}
+            <main className="page-compact" style={embedMode ? { paddingTop: 12, minHeight: "auto" } : undefined}>
                 <div className="page-container">
                     <div style={{ marginBottom: 12, display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
                         <div>
                             <h1 style={{ margin: 0, fontSize: "1.5rem", fontWeight: 800, letterSpacing: "-0.02em" }}>
-                                Factor Lab
+                                {embedMode ? "Signal Lab · Model Signal Mixer" : "Factor Lab"}
                             </h1>
                             <p style={{ margin: "4px 0 0", color: "var(--text-secondary)", fontSize: "0.85rem" }}>
-                                Build custom model strategies from your <code>Models</code> factors with parameter overrides and weighted combinations.
+                                Build custom model strategies from your <code>Models/signals</code> factors with parameter overrides and weighted combinations.
                             </p>
                         </div>
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <Link href="/signal-construction" style={secondaryBtn}>
-                                Technical Builder
-                            </Link>
+                            {embedMode ? (
+                                <Link href="/signal-lab?tab=technical" style={secondaryBtn}>
+                                    Open Technical Tab
+                                </Link>
+                            ) : (
+                                <Link href="/signal-construction" style={secondaryBtn}>
+                                    Technical Builder
+                                </Link>
+                            )}
                             <button className="btn-primary" disabled={runLoading || enabledRows.length === 0 || loadingCatalog} onClick={runFactorLab}>
                                 <PlayCircle size={16} />
                                 {runLoading ? "Running..." : "Run Factor Backtest"}

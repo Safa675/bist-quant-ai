@@ -183,29 +183,6 @@ async function executeLocal(payload: SignalConstructionPayload): Promise<Record<
 
 export async function executeSignalPython(payload: SignalConstructionPayload): Promise<Record<string, unknown>> {
     const remoteCandidates = buildRemoteCandidates();
-
-    // If a dedicated remote engine is configured, try it first.
-    if (REMOTE_ENGINE_URL) {
-        const remoteErrors: string[] = [];
-        for (const url of remoteCandidates) {
-            try {
-                return await executeRemoteSignalEngine(url, payload);
-            } catch (err) {
-                remoteErrors.push(`${url} -> ${asErrorMessage(err)}`);
-            }
-        }
-
-        try {
-            return await executeLocal(payload);
-        } catch (localErr) {
-            const details = [...remoteErrors, `local python -> ${asErrorMessage(localErr)}`]
-                .map((entry, idx) => `${idx + 1}. ${entry}`)
-                .join("\n");
-            throw new Error(`Signal engine failed for all execution paths.\n${details}`);
-        }
-    }
-
-    // Default mode: run local Python directly.
     try {
         return await executeLocal(payload);
     } catch (localErr) {

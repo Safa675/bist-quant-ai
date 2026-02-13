@@ -268,6 +268,11 @@ function ActionBadge({ action }: { action: string }) {
 }
 
 export default function SignalConstructionPage() {
+    const [embedMode] = useState<boolean>(() => {
+        if (typeof window === "undefined") return false;
+        return new URLSearchParams(window.location.search).get("embed") === "1";
+    });
+
     const [universe, setUniverse] = useState<Universe>("XU100");
     const [customSymbols, setCustomSymbols] = useState<string>("THYAO,AKBNK,GARAN,EREGL,TUPRS");
     const [period, setPeriod] = useState<string>("6mo");
@@ -592,12 +597,19 @@ export default function SignalConstructionPage() {
 
     return (
         <>
-            <Navbar />
-            <main style={{ paddingTop: 92, paddingBottom: 64, background: "var(--bg-primary)", minHeight: "100vh" }}>
+            {!embedMode && <Navbar />}
+            <main
+                style={{
+                    paddingTop: embedMode ? 12 : 92,
+                    paddingBottom: embedMode ? 16 : 64,
+                    background: "var(--bg-primary)",
+                    minHeight: embedMode ? "auto" : "100vh",
+                }}
+            >
                 <div style={{ maxWidth: 1400, margin: "0 auto", padding: "0 24px" }}>
                     <div style={{ marginBottom: 22 }}>
                         <h1 style={{ margin: 0, fontSize: "1.8rem", fontWeight: 800, letterSpacing: "-0.02em" }}>
-                            Signal Construction
+                            {embedMode ? "Signal Lab · Technical Builder" : "Signal Construction"}
                         </h1>
                         <p style={{ marginTop: 8, marginBottom: 0, color: "var(--text-secondary)" }}>
                             Build, backtest, and publish technical-indicator signals from your production borsapy stack.
