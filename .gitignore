@@ -1,0 +1,139 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# ===================
+# DEPENDENCIES
+# ===================
+# Node modules (all locations - nested included)
+**/node_modules/
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# ===================
+# BUILD & CACHE
+# ===================
+# Next.js
+**/.next/
+/out/
+/build
+
+# Testing
+/coverage
+
+# Caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+*_cache/
+.turbo/
+.cache/
+
+# ===================
+# ENVIRONMENT & SECRETS
+# ===================
+# Environment files (NEVER commit these!)
+.env*
+!.env.example
+
+# API keys and credentials
+*API*.txt
+*api*.txt
+*secret*
+*credentials*
+*_cookies.txt
+
+# ===================
+# LARGE DATA FILES
+# ===================
+# Data files (too large for git)
+*.csv
+*.parquet
+*.xlsx
+*.xls
+*.json.gz
+!package.json
+!tsconfig.json
+!*.config.json
+
+# Keep compressed versions as exception if needed
+!data/*.csv.gz
+
+# ===================
+# PROJECT GENERATED OUTPUTS
+# ===================
+# Local backup artifacts
+*.backup
+
+# Generated app/runtime data
+dashboard/dashboard_data.json
+Regime\ Filter/outputs/
+
+# ===================
+# MODEL ARTIFACTS
+# ===================
+# Machine learning models (use Git LFS or external storage)
+*.pkl
+*.pickle
+*.pt
+*.pth
+*.h5
+*.hdf5
+*.onnx
+*.joblib
+*.model
+*.weights
+
+# ===================
+# PYTHON
+# ===================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+.eggs/
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ===================
+# MISC
+# ===================
+.DS_Store
+*.pem
+Thumbs.db
+
+# Debug & logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.log
+
+# Vercel
+.vercel
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.AppleDouble
+.LSOverride
