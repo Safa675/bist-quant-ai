@@ -109,6 +109,7 @@ async def root() -> JSONResponse:
 
 
 @app.get("/api/health")
+@app.get("/py-api/api/health")
 async def health() -> JSONResponse:
     return JSONResponse({
         "status": "ok",
@@ -122,6 +123,7 @@ async def health() -> JSONResponse:
 # ====================
 
 @app.get("/api/factor_lab")
+@app.get("/py-api/api/factor_lab")
 async def get_factor_catalog() -> JSONResponse:
     """Get available factors and portfolio options."""
     try:
@@ -131,6 +133,7 @@ async def get_factor_catalog() -> JSONResponse:
 
 
 @app.post("/api/factor_lab")
+@app.post("/py-api/api/factor_lab")
 async def post_factor_run(request: Request) -> JSONResponse:
     """Run factor analysis or backtest."""
     try:
@@ -171,6 +174,7 @@ async def post_factor_run(request: Request) -> JSONResponse:
 # ====================
 
 @app.get("/api/signal_construction")
+@app.get("/py-api/api/signal_construction")
 async def get_signal_metadata() -> JSONResponse:
     """Get available indicators and options for signal construction."""
     return JSONResponse({
@@ -190,6 +194,7 @@ async def get_signal_metadata() -> JSONResponse:
 
 
 @app.post("/api/signal_construction")
+@app.post("/py-api/api/signal_construction")
 async def post_signal_run(request: Request) -> JSONResponse:
     """Construct signals or run backtest."""
     try:
