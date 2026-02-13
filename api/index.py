@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import importlib.util
 import io
-import json
 import sys
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -18,6 +17,8 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+
+from dashboard.common_response import error_response, generate_run_id, success_response
 
 # Setup paths
 ROOT = Path(__file__).resolve().parent.parent
@@ -82,6 +83,13 @@ def _error(message: str, status_code: int = 400) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status_code)
 
 
+def _resolve_run_id(payload: Any, prefix: str) -> str:
+    candidate = payload.get("run_id") if isinstance(payload, dict) else None
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate.strip()
+    return generate_run_id(prefix)
+
+
 def _factor_catalog() -> dict[str, Any]:
     """Build factor catalog from the engine."""
     factor_lab_api = get_factor_lab_api()
@@ -136,10 +144,19 @@ async def health() -> JSONResponse:
 @app.get("/py-api/api/factor_lab")
 async def get_factor_catalog() -> JSONResponse:
     """Get available factors and portfolio options."""
+    run_id = generate_run_id("factor_lab")
     try:
-        return JSONResponse(_factor_catalog())
+        return JSONResponse(success_response(
+            _factor_catalog(),
+            run_id=run_id,
+            meta={"engine": "factor_lab", "mode": "catalog"},
+        ))
     except Exception as exc:
-        return _error(str(exc), status_code=500)
+        return JSONResponse(error_response(
+            str(exc),
+            run_id=run_id,
+            meta={"engine": "factor_lab", "mode": "catalog"},
+        ))
 
 
 @app.post("/api/factor_lab")
@@ -154,29 +171,47 @@ async def post_factor_run(request: Request) -> JSONResponse:
     if not isinstance(payload, dict):
         return _error("Request body must be a JSON object.")
 
+    run_id = _resolve_run_id(payload, "factor_lab")
     mode = str(payload.get("_mode", "run")).strip().lower()
 
     # Block heavy computation on Vercel
     factor_key = payload.get("factor_key", "")
     if factor_key == "five_factor_rotation":
-        return _error(
+        return JSONResponse(error_response(
             "five_factor_rotation is too computationally intensive for serverless. "
             "Use a different factor or deploy to a dedicated server.",
-            status_code=400
-        )
+            run_id=run_id,
+            meta={"engine": "factor_lab", "mode": mode},
+        ))
 
     try:
         factor_lab_api = get_factor_lab_api()
         if mode == "catalog":
-            return JSONResponse(_factor_catalog())
+            return JSONResponse(success_response(
+                _factor_catalog(),
+                run_id=run_id,
+                meta={"engine": "factor_lab", "mode": mode},
+            ))
 
         with redirect_stdout(io.StringIO()):
             response = factor_lab_api._build_response(payload)
-        return JSONResponse(response)
+        return JSONResponse(success_response(
+            response,
+            run_id=run_id,
+            meta={"engine": "factor_lab", "mode": mode},
+        ))
     except ValueError as exc:
-        return _error(str(exc), status_code=400)
+        return JSONResponse(error_response(
+            str(exc),
+            run_id=run_id,
+            meta={"engine": "factor_lab", "mode": mode},
+        ))
     except Exception as exc:
-        return _error(str(exc), status_code=500)
+        return JSONResponse(error_response(
+            str(exc),
+            run_id=run_id,
+            meta={"engine": "factor_lab", "mode": mode},
+        ))
 
 
 # ====================
@@ -187,20 +222,25 @@ async def post_factor_run(request: Request) -> JSONResponse:
 @app.get("/py-api/api/signal_construction")
 async def get_signal_metadata() -> JSONResponse:
     """Get available indicators and options for signal construction."""
-    return JSONResponse({
-        "universes": ["XU030", "XU100", "XUTUM", "CUSTOM"],
-        "periods": ["1mo", "3mo", "6mo", "1y", "2y", "5y"],
-        "intervals": ["1d"],
-        "indicators": [
-            {"key": "rsi", "label": "RSI"},
-            {"key": "macd", "label": "MACD Histogram"},
-            {"key": "bollinger", "label": "Bollinger %B"},
-            {"key": "atr", "label": "ATR (Cross-Sectional)"},
-            {"key": "stochastic", "label": "Stochastic %K"},
-            {"key": "adx", "label": "ADX (+DI/-DI trend)"},
-            {"key": "supertrend", "label": "Supertrend Direction"},
-        ],
-    })
+    run_id = generate_run_id("signal_construction")
+    return JSONResponse(success_response(
+        {
+            "universes": ["XU030", "XU100", "XUTUM", "CUSTOM"],
+            "periods": ["1mo", "3mo", "6mo", "1y", "2y", "5y"],
+            "intervals": ["1d"],
+            "indicators": [
+                {"key": "rsi", "label": "RSI"},
+                {"key": "macd", "label": "MACD Histogram"},
+                {"key": "bollinger", "label": "Bollinger %B"},
+                {"key": "atr", "label": "ATR (Cross-Sectional)"},
+                {"key": "stochastic", "label": "Stochastic %K"},
+                {"key": "adx", "label": "ADX (+DI/-DI trend)"},
+                {"key": "supertrend", "label": "Supertrend Direction"},
+            ],
+        },
+        run_id=run_id,
+        meta={"engine": "signal_construction", "mode": "meta"},
+    ))
 
 
 @app.post("/api/signal_construction")
@@ -215,6 +255,7 @@ async def post_signal_run(request: Request) -> JSONResponse:
     if not isinstance(payload, dict):
         return _error("Request body must be a JSON object.")
 
+    run_id = _resolve_run_id(payload, "signal_construction")
     mode = str(payload.get("_mode", "construct")).strip().lower()
 
     try:
@@ -226,11 +267,23 @@ async def post_signal_run(request: Request) -> JSONResponse:
             with redirect_stdout(io.StringIO()):
                 response = signal_construction_api._build_response(payload)
 
-        return JSONResponse(response)
+        return JSONResponse(success_response(
+            response,
+            run_id=run_id,
+            meta={"engine": "signal_construction", "mode": mode},
+        ))
     except ValueError as exc:
-        return _error(str(exc), status_code=400)
+        return JSONResponse(error_response(
+            str(exc),
+            run_id=run_id,
+            meta={"engine": "signal_construction", "mode": mode},
+        ))
     except Exception as exc:
-        return _error(str(exc), status_code=500)
+        return JSONResponse(error_response(
+            str(exc),
+            run_id=run_id,
+            meta={"engine": "signal_construction", "mode": mode},
+        ))
 
 
 # ====================
@@ -241,13 +294,22 @@ async def post_signal_run(request: Request) -> JSONResponse:
 @app.get("/py-api/api/stock_filter")
 async def get_stock_filter_meta() -> JSONResponse:
     """Get templates/filter fields for stock screening."""
+    run_id = generate_run_id("stock_filter")
     try:
         stock_filter_api = get_stock_filter_api()
         with redirect_stdout(io.StringIO()):
             response = stock_filter_api._meta_response()
-        return JSONResponse(response)
+        return JSONResponse(success_response(
+            response,
+            run_id=run_id,
+            meta={"engine": "stock_filter", "mode": "meta"},
+        ))
     except Exception as exc:
-        return _error(str(exc), status_code=500)
+        return JSONResponse(error_response(
+            str(exc),
+            run_id=run_id,
+            meta={"engine": "stock_filter", "mode": "meta"},
+        ))
 
 
 @app.post("/api/stock_filter")
@@ -262,6 +324,7 @@ async def post_stock_filter_run(request: Request) -> JSONResponse:
     if not isinstance(payload, dict):
         return _error("Request body must be a JSON object.")
 
+    run_id = _resolve_run_id(payload, "stock_filter")
     mode = str(payload.get("_mode", "run")).strip().lower()
 
     try:
@@ -272,8 +335,20 @@ async def post_stock_filter_run(request: Request) -> JSONResponse:
         else:
             with redirect_stdout(io.StringIO()):
                 response = stock_filter_api._run_response(payload)
-        return JSONResponse(response)
+        return JSONResponse(success_response(
+            response,
+            run_id=run_id,
+            meta={"engine": "stock_filter", "mode": mode},
+        ))
     except ValueError as exc:
-        return _error(str(exc), status_code=400)
+        return JSONResponse(error_response(
+            str(exc),
+            run_id=run_id,
+            meta={"engine": "stock_filter", "mode": mode},
+        ))
     except Exception as exc:
-        return _error(str(exc), status_code=500)
+        return JSONResponse(error_response(
+            str(exc),
+            run_id=run_id,
+            meta={"engine": "stock_filter", "mode": mode},
+        ))

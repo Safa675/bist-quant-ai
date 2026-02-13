@@ -10,6 +10,7 @@
  */
 
 import { logError, logInfo } from "./logging";
+import { getAgentToolPolicy } from "./policy";
 import {
     executeMCPTool,
     getBorsaMcpToolDefinitions,
@@ -51,6 +52,7 @@ interface ToolOrchestrationOptions {
     requestId?: string;
     maxToolCalls?: number;
     maxRetries?: number;
+    maxConsecutiveToolFailures?: number;
 }
 
 const RESEARCH_SYSTEM_PROMPT = `You are a Research Analyst AI agent for Quant AI Platform.
@@ -70,16 +72,7 @@ Tool usage policy:
 Available screening presets: value_stocks, growth_stocks, high_dividend, low_pe, high_momentum, oversold, overbought, breakout, undervalued, quality, small_cap, large_cap
 Available scan types: oversold, overbought, macd_bullish, macd_bearish, supertrend_buy, supertrend_sell, golden_cross, death_cross`;
 
-const DEFAULT_MAX_TOOL_ITERATIONS = 8;
-const AGENT_MAX_TOOL_ITERATIONS: Record<ToolEnabledAgentType, number> = {
-    research: 10,
-    portfolio: 8,
-    risk: 8,
-    analyst: 8,
-};
-const DEFAULT_MAX_RETRIES = 2;
 const RETRY_DELAY_MS = 1000;
-const MAX_CONSECUTIVE_ALL_TOOL_FAILURES = 2;
 
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -166,8 +159,10 @@ function _extractFinishReason(payload: unknown): string {
 }
 
 function getToolSystemPrompt(agent: ToolEnabledAgentType): string {
+    const policy = getAgentToolPolicy(agent);
+    const dynamicToolingInstructions = MCP_TOOLING_INSTRUCTIONS.replace("<= 3", `<= ${policy.maxSymbolsPerToolCall}`);
     const basePrompt = agent === "research" ? RESEARCH_SYSTEM_PROMPT : getSystemPrompt(agent);
-    return `${basePrompt}\n\n${MCP_TOOLING_INSTRUCTIONS}`;
+    return `${basePrompt}\n\n${dynamicToolingInstructions}`;
 }
 
 /**
@@ -190,8 +185,10 @@ export async function generateToolEnabledAgentResponse(
         `?api-version=${encodeURIComponent(cfg.apiVersion)}`;
 
     const contextStr = buildContext(context);
-    const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
-    const maxIterations = options.maxToolCalls ?? AGENT_MAX_TOOL_ITERATIONS[agent] ?? DEFAULT_MAX_TOOL_ITERATIONS;
+    const policy = getAgentToolPolicy(agent);
+    const maxRetries = options.maxRetries ?? policy.maxRetries;
+    const maxIterations = options.maxToolCalls ?? policy.maxToolCalls;
+    const maxConsecutiveAllToolFailures = options.maxConsecutiveToolFailures ?? policy.maxConsecutiveToolFailures;
     const toolDefinitions = await getBorsaMcpToolDefinitions(options.requestId);
 
     const toolsUsed: string[] = [];
@@ -224,6 +221,8 @@ export async function generateToolEnabledAgentResponse(
         queryChars: sanitizedQuery.length,
         toolCount: toolDefinitions.length,
         maxIterations,
+        maxRetries,
+        maxConsecutiveAllToolFailures,
     });
 
     for (let iteration = 0; iteration < maxIterations; iteration++) {
@@ -401,7 +400,7 @@ export async function generateToolEnabledAgentResponse(
             consecutiveAllToolFailures = 0;
         }
 
-        if (consecutiveAllToolFailures >= MAX_CONSECUTIVE_ALL_TOOL_FAILURES) {
+        if (consecutiveAllToolFailures >= maxConsecutiveAllToolFailures) {
             const lastErrors = toolResponses
                 .filter((tr) => !tr.result.success)
                 .map((tr) => `${tr.toolName}: ${tr.result.error || "unknown error"}`);
@@ -435,7 +434,7 @@ export async function generateToolEnabledAgentResponse(
     });
 
     return {
-        response: "I reached the maximum number of tool calls. Please narrow the request and try again.",
+        response: `I reached the maximum number of tool calls (${maxIterations}). Please narrow the request and try again.`,
         toolsUsed,
         toolResults,
         usage: totalUsage,

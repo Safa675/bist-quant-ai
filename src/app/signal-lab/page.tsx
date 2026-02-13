@@ -7,8 +7,10 @@ import { FlaskConical, SlidersHorizontal } from "lucide-react";
 
 type TabKey = "models" | "technical";
 
-interface FactorCatalogResponse {
-    factors?: Array<{ name: string }>;
+interface UnifiedCatalogResponse {
+    factor_catalog?: {
+        factors?: Array<{ name: string }>;
+    };
     error?: string;
 }
 
@@ -23,13 +25,13 @@ export default function SignalLabPage() {
     useEffect(() => {
         const loadCatalog = async () => {
             try {
-                const response = await fetch("/api/factor-lab", { cache: "no-store" });
-                const data = (await response.json()) as FactorCatalogResponse;
+                const response = await fetch("/api/catalog", { cache: "no-store" });
+                const data = (await response.json()) as UnifiedCatalogResponse;
                 if (!response.ok || data.error) {
                     return;
                 }
-                if (Array.isArray(data.factors)) {
-                    setSignalCount(data.factors.length);
+                if (Array.isArray(data.factor_catalog?.factors)) {
+                    setSignalCount(data.factor_catalog.factors.length);
                 }
             } catch {
                 // Ignore count failures and keep UX responsive.

@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import Navbar from "@/components/Navbar";
+import RunHistoryList from "@/components/RunHistoryList";
+import RunStatusPanel from "@/components/RunStatusPanel";
 import { Settings2, PlayCircle, SlidersHorizontal, TrendingUp, TrendingDown, Minus } from "lucide-react";
 
 type Universe = "XU030" | "XU100" | "XUTUM" | "CUSTOM";
@@ -92,7 +94,22 @@ interface BacktestResult {
     current_holdings: string[];
     equity_curve: Array<{ date: string; value: number }>;
     benchmark_curve: Array<{ date: string; value: number }>;
+    analytics_v2?: {
+        summary?: Record<string, unknown>;
+        yearly?: Array<Record<string, unknown>>;
+        monthly?: Array<Record<string, unknown>>;
+        drawdown?: Record<string, unknown>;
+        tail_risk?: Record<string, unknown>;
+        benchmark?: Record<string, unknown>;
+        turnover?: Record<string, unknown>;
+    };
     error?: string;
+}
+
+interface RunRecordPayload {
+    id: string;
+    status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+    error?: { code?: string; message?: string };
 }
 
 interface PresetRecord {
@@ -300,6 +317,8 @@ export default function SignalConstructionPage() {
     const [backtestLoading, setBacktestLoading] = useState<boolean>(false);
     const [backtestError, setBacktestError] = useState<string | null>(null);
     const [backtestResult, setBacktestResult] = useState<BacktestResult | null>(null);
+    const [backtestRunId, setBacktestRunId] = useState<string | null>(null);
+    const [backtestRunStatus, setBacktestRunStatus] = useState<string | null>(null);
 
     const enabledIndicators = useMemo(
         () => (Object.keys(indicators) as IndicatorKey[]).filter((key) => indicators[key].enabled),
@@ -421,27 +440,73 @@ export default function SignalConstructionPage() {
         setBacktestLoading(true);
         setBacktestError(null);
         setPublishStatus(null);
+        setBacktestRunId(null);
+        setBacktestRunStatus("queueing");
 
         try {
-            const response = await fetch("/api/signal-construction/backtest", {
+            const response = await fetch("/api/runs", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(buildPayload()),
+                body: JSON.stringify({
+                    kind: "signal_backtest",
+                    execute: true,
+                    request: buildPayload(),
+                }),
             });
-            const data: BacktestResult = await response.json();
+            const data = await response.json() as {
+                error?: string;
+                run?: RunRecordPayload;
+            };
 
-            if (!response.ok || data.error) {
-                throw new Error(data.error || `Backtest failed (${response.status})`);
+            if (!response.ok || data.error || !data.run?.id) {
+                throw new Error(data.error || `Backtest queue failed (${response.status})`);
+            }
+            setBacktestRunId(data.run.id);
+            setBacktestRunStatus(data.run.status);
+
+            const timeoutMs = 15 * 60 * 1000;
+            const started = Date.now();
+            let finalArtifact: BacktestResult | null = null;
+
+            while (Date.now() - started < timeoutMs) {
+                await new Promise((resolve) => setTimeout(resolve, 1500));
+                const runResponse = await fetch(`/api/runs/${data.run.id}?include_artifact=1`, { cache: "no-store" });
+                const runData = await runResponse.json() as {
+                    error?: string;
+                    run?: RunRecordPayload;
+                    artifact?: unknown;
+                };
+
+                if (!runResponse.ok || runData.error || !runData.run) {
+                    throw new Error(runData.error || `Backtest status failed (${runResponse.status})`);
+                }
+
+                setBacktestRunStatus(runData.run.status);
+                if (runData.run.status === "failed" || runData.run.status === "cancelled") {
+                    throw new Error(runData.run.error?.message || "Backtest run failed.");
+                }
+                if (runData.run.status === "succeeded") {
+                    if (!runData.artifact || typeof runData.artifact !== "object" || Array.isArray(runData.artifact)) {
+                        throw new Error("Backtest run succeeded but artifact payload is missing.");
+                    }
+                    finalArtifact = runData.artifact as BacktestResult;
+                    break;
+                }
             }
 
-            setBacktestResult(data);
+            if (!finalArtifact) {
+                throw new Error("Backtest timed out while waiting for completion.");
+            }
 
-            if (Array.isArray(data.current_holdings) && data.current_holdings.length > 0) {
-                setSelectedSymbols(new Set(data.current_holdings));
+            setBacktestResult(finalArtifact);
+
+            if (Array.isArray(finalArtifact.current_holdings) && finalArtifact.current_holdings.length > 0) {
+                setSelectedSymbols(new Set(finalArtifact.current_holdings));
             }
         } catch (err) {
             const message = err instanceof Error ? err.message : "Unknown error";
             setBacktestError(message);
+            setBacktestRunStatus("failed");
         } finally {
             setBacktestLoading(false);
         }
@@ -840,6 +905,20 @@ export default function SignalConstructionPage() {
                         </div>
                     )}
 
+                    <RunStatusPanel
+                        title="Signal Backtest Run"
+                        runId={backtestRunId}
+                        status={backtestRunStatus}
+                        loading={backtestLoading}
+                        error={null}
+                    />
+
+                    <RunHistoryList
+                        kind="signal_backtest"
+                        title="Recent Signal Backtest Runs"
+                        limit={6}
+                    />
+
                     {publishError && (
                         <div className="glass-card" style={{ padding: 16, borderColor: "rgba(244,63,94,0.35)", marginBottom: 20 }}>
                             <strong style={{ color: "var(--accent-rose)" }}>Publish failed:</strong>{" "}
@@ -1023,6 +1102,81 @@ export default function SignalConstructionPage() {
                                     </span>
                                 ))}
                             </div>
+
+                            {backtestResult.analytics_v2 && (
+                                <div style={{ marginTop: 14 }}>
+                                    <h3 style={{ margin: "0 0 8px", fontSize: "0.95rem" }}>Detailed Analytics (v2)</h3>
+                                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10, marginBottom: 10 }}>
+                                        <div className="glass-card" style={{ padding: 10 }}>
+                                            <div className="metric-label">Current DD</div>
+                                            <div className="metric-value" style={{ fontSize: "1rem" }}>
+                                                {formatPercent(Number(backtestResult.analytics_v2.drawdown?.current_dd ?? NaN))}
+                                            </div>
+                                        </div>
+                                        <div className="glass-card" style={{ padding: 10 }}>
+                                            <div className="metric-label">VaR 95%</div>
+                                            <div className="metric-value" style={{ fontSize: "1rem" }}>
+                                                {formatPercent(Number(backtestResult.analytics_v2.tail_risk?.var_95 ?? NaN))}
+                                            </div>
+                                        </div>
+                                        <div className="glass-card" style={{ padding: 10 }}>
+                                            <div className="metric-label">CVaR 95%</div>
+                                            <div className="metric-value" style={{ fontSize: "1rem" }}>
+                                                {formatPercent(Number(backtestResult.analytics_v2.tail_risk?.cvar_95 ?? NaN))}
+                                            </div>
+                                        </div>
+                                        <div className="glass-card" style={{ padding: 10 }}>
+                                            <div className="metric-label">Correlation</div>
+                                            <div className="metric-value" style={{ fontSize: "1rem" }}>
+                                                {formatNumber(Number(backtestResult.analytics_v2.benchmark?.correlation ?? NaN), 2)}
+                                            </div>
+                                        </div>
+                                        <div className="glass-card" style={{ padding: 10 }}>
+                                            <div className="metric-label">Info Ratio</div>
+                                            <div className="metric-value" style={{ fontSize: "1rem" }}>
+                                                {formatNumber(Number(backtestResult.analytics_v2.benchmark?.information_ratio ?? NaN), 2)}
+                                            </div>
+                                        </div>
+                                        <div className="glass-card" style={{ padding: 10 }}>
+                                            <div className="metric-label">Avg Turnover</div>
+                                            <div className="metric-value" style={{ fontSize: "1rem" }}>
+                                                {formatNumber(Number(backtestResult.analytics_v2.turnover?.avg_turnover ?? NaN), 2)}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {Array.isArray(backtestResult.analytics_v2.yearly) && backtestResult.analytics_v2.yearly.length > 0 && (
+                                        <div style={{ overflowX: "auto" }}>
+                                            <table className="data-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Year</th>
+                                                        <th>Return</th>
+                                                        <th>Vol</th>
+                                                        <th>Sharpe</th>
+                                                        <th>Max DD</th>
+                                                        <th>Win Rate</th>
+                                                        <th>Days</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {backtestResult.analytics_v2.yearly.map((row, idx) => (
+                                                        <tr key={`signal-yearly-${idx}`}>
+                                                            <td>{String(row.year ?? "—")}</td>
+                                                            <td>{formatPercent(Number(row.return ?? NaN))}</td>
+                                                            <td>{formatPercent(Number(row.volatility ?? NaN))}</td>
+                                                            <td>{formatNumber(Number(row.sharpe ?? NaN), 2)}</td>
+                                                            <td>{formatPercent(Number(row.max_dd ?? NaN))}</td>
+                                                            <td>{formatPercent(Number(row.win_rate ?? NaN))}</td>
+                                                            <td>{String(row.trading_days ?? "—")}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>

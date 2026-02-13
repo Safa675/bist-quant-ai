@@ -1,22 +1,12 @@
 import { randomUUID } from "crypto";
+import { emitStructuredLog } from "@/lib/server/telemetry";
 
 type LogLevel = "info" | "error";
 
 type LogMeta = Record<string, unknown>;
 
 function emitLog(level: LogLevel, event: string, meta: LogMeta = {}) {
-    const payload = {
-        ts: new Date().toISOString(),
-        level,
-        event,
-        ...meta,
-    };
-    const line = JSON.stringify(payload);
-    if (level === "error") {
-        console.error(line);
-    } else {
-        console.info(line);
-    }
+    emitStructuredLog(level, event, meta);
 }
 
 export function createRequestId(): string {

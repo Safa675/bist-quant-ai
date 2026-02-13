@@ -23,6 +23,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from analytics_payloads import build_backtest_analytics_v2
+from common_response import error_response, generate_run_id, success_response
+
 
 APP_ROOT = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = APP_ROOT
@@ -1011,6 +1014,12 @@ def _build_backtest_response(payload: dict[str, Any]) -> dict[str, Any]:
     ]
 
     elapsed_ms = int((time.perf_counter() - started) * 1000)
+    analytics_v2 = build_backtest_analytics_v2(
+        returns=portfolio_series,
+        equity=equity,
+        benchmark_returns=benchmark_series,
+        holdings_history=None,
+    )
 
     return {
         "meta": {
@@ -1043,22 +1052,41 @@ def _build_backtest_response(payload: dict[str, Any]) -> dict[str, Any]:
         "current_holdings": current_holdings,
         "equity_curve": equity_curve,
         "benchmark_curve": benchmark_curve,
+        "analytics_v2": analytics_v2,
     }
 
 
 def _main() -> int:
+    run_id = generate_run_id("signal_construction")
     try:
         payload = _parse_payload()
+        requested_run_id = payload.get("run_id") if isinstance(payload, dict) else None
+        if isinstance(requested_run_id, str) and requested_run_id.strip():
+            run_id = requested_run_id.strip()
         mode = str(payload.get("_mode", "construct")).strip().lower()
         if mode == "backtest":
             response = _build_backtest_response(payload)
         else:
             response = _build_response(payload)
-        print(json.dumps(response, ensure_ascii=False))
+        envelope = success_response(
+            response,
+            run_id=run_id,
+            meta={
+                "engine": "signal_construction",
+                "mode": mode,
+            },
+        )
+        print(json.dumps(envelope, ensure_ascii=False))
         return 0
     except Exception as exc:
-        error_payload = {"error": str(exc)}
-        print(json.dumps(error_payload, ensure_ascii=False))
+        envelope = error_response(
+            str(exc),
+            run_id=run_id,
+            meta={
+                "engine": "signal_construction",
+            },
+        )
+        print(json.dumps(envelope, ensure_ascii=False))
         return 0
 
 

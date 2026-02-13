@@ -1,0 +1,68 @@
+{
+  "run_id": "stock_filter_fixture_001",
+  "meta": {
+    "timestamp": "2026-02-13T15:10:00.000Z",
+    "mode": "run",
+    "engine": "local_python",
+    "trace_id": "trace-stock-filter-fixture-001"
+  },
+  "result": {
+    "meta": {
+      "as_of": "2026-02-13T15:10:00.000Z",
+      "execution_ms": 412,
+      "total_matches": 38,
+      "returned_rows": 38,
+      "template": null,
+      "sector": "Bankacılık",
+      "index": "XUTUM",
+      "recommendation": null,
+      "sort_by": "upside_potential_pct",
+      "sort_desc": true
+    },
+    "columns": [
+      { "key": "symbol", "label": "Symbol" },
+      { "key": "name", "label": "Company" },
+      { "key": "pb", "label": "P/B" },
+      { "key": "upside_potential_pct", "label": "Upside Potential (%)" }
+    ],
+    "rows": [
+      {
+        "symbol": "AKBNK.IS",
+        "name": "Akbank",
+        "pb": 0.92,
+        "upside_potential_pct": 18.6,
+        "recommendation": "buy"
+      },
+      {
+        "symbol": "ISCTR.IS",
+        "name": "Is Bankasi",
+        "pb": 1.01,
+        "upside_potential_pct": 15.2,
+        "recommendation": "buy"
+      }
+    ],
+    "applied_filters": [
+      {
+        "key": "roe_pct",
+        "label": "ROE (%)",
+        "min": 10,
+        "max": null
+      }
+    ],
+    "applied_percentile_filters": [
+      {
+        "key": "pb",
+        "label": "P/B",
+        "min_pct": null,
+        "max_pct": 10
+      },
+      {
+        "key": "market_cap_tl_mn",
+        "label": "Market Cap (TL mn)",
+        "min_pct": 30,
+        "max_pct": null
+      }
+    ]
+  },
+  "error": null
+}

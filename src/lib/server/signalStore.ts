@@ -1,11 +1,6 @@
 import { existsSync } from "fs";
 import { mkdir, readFile, writeFile } from "fs/promises";
-import { join } from "path";
-
-const DATA_DIR = process.env.VERCEL
-    ? "/tmp/bist-quant-ai-data"
-    : join(process.cwd(), "data");
-const STORE_PATH = join(DATA_DIR, "signal_store.json");
+import { DATA_DIR, SIGNAL_STORE_PATH } from "@/lib/server/storagePaths";
 
 export interface IndicatorPayload {
     enabled?: boolean;
@@ -121,11 +116,11 @@ async function ensureStoreDir(): Promise<void> {
 
 async function readStore(): Promise<SignalStore> {
     await ensureStoreDir();
-    if (!existsSync(STORE_PATH)) {
+    if (!existsSync(SIGNAL_STORE_PATH)) {
         return { ...DEFAULT_STORE };
     }
 
-    const raw = await readFile(STORE_PATH, "utf-8");
+    const raw = await readFile(SIGNAL_STORE_PATH, "utf-8");
     try {
         const parsed: unknown = JSON.parse(raw);
         return parseStore(parsed);
@@ -136,7 +131,7 @@ async function readStore(): Promise<SignalStore> {
 
 async function writeStore(store: SignalStore): Promise<void> {
     await ensureStoreDir();
-    await writeFile(STORE_PATH, JSON.stringify(store, null, 2), "utf-8");
+    await writeFile(SIGNAL_STORE_PATH, JSON.stringify(store, null, 2), "utf-8");
 }
 
 export async function listPresets(): Promise<StoredPreset[]> {

@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import Link from "next/link";
 import Navbar from "@/components/Navbar";
+import RunHistoryList from "@/components/RunHistoryList";
+import RunStatusPanel from "@/components/RunStatusPanel";
 import { FlaskConical, PlayCircle, Plus, Trash2, Upload } from "lucide-react";
 
 interface FactorParamSchema {
@@ -100,7 +102,28 @@ interface FactorLabResult {
     current_holdings: string[];
     equity_curve: Array<{ date: string; value: number }>;
     benchmark_curve: Array<{ date: string; value: number }>;
+    analytics_v2?: {
+        summary?: Record<string, unknown>;
+        yearly?: Array<Record<string, unknown>>;
+        monthly?: Array<Record<string, unknown>>;
+        drawdown?: Record<string, unknown>;
+        tail_risk?: Record<string, unknown>;
+        benchmark?: Record<string, unknown>;
+        turnover?: Record<string, unknown>;
+    };
     error?: string;
+}
+
+interface RunErrorPayload {
+    code?: string;
+    message?: string;
+    details?: unknown;
+}
+
+interface RunRecordPayload {
+    id: string;
+    status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+    error?: RunErrorPayload;
 }
 
 function formatPercent(value: number | null | undefined, digits: number = 2): string {
@@ -216,6 +239,8 @@ export default function FactorLabPage() {
     const [runLoading, setRunLoading] = useState<boolean>(false);
     const [runError, setRunError] = useState<string | null>(null);
     const [result, setResult] = useState<FactorLabResult | null>(null);
+    const [runJobId, setRunJobId] = useState<string | null>(null);
+    const [runJobStatus, setRunJobStatus] = useState<string | null>(null);
 
     const [publishName, setPublishName] = useState<string>("custom_factor_lab");
     const [publishLoading, setPublishLoading] = useState<boolean>(false);
@@ -351,6 +376,8 @@ export default function FactorLabPage() {
         setRunError(null);
         setPublishStatus(null);
         setPublishError(null);
+        setRunJobId(null);
+        setRunJobStatus("queueing");
 
         try {
             const payload = {
@@ -367,21 +394,68 @@ export default function FactorLabPage() {
                 })),
             };
 
-            const response = await fetch("/api/factor-lab", {
+            const response = await fetch("/api/runs", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
+                body: JSON.stringify({
+                    kind: "factor_lab",
+                    execute: true,
+                    request: payload,
+                }),
             });
 
-            const data: FactorLabResult = await response.json();
-            if (!response.ok || data.error) {
-                throw new Error(data.error || `Backtest failed (${response.status})`);
+            const runPayload = await response.json() as {
+                error?: string;
+                run?: RunRecordPayload;
+            };
+
+            if (!response.ok || runPayload.error || !runPayload.run?.id) {
+                throw new Error(runPayload.error || `Backtest queue failed (${response.status})`);
+            }
+            const queuedRunId = runPayload.run.id;
+            setRunJobId(queuedRunId);
+            setRunJobStatus(runPayload.run.status);
+
+            const timeoutMs = 15 * 60 * 1000;
+            const pollStarted = Date.now();
+            let finalArtifact: FactorLabResult | null = null;
+
+            while (Date.now() - pollStarted < timeoutMs) {
+                await new Promise((resolve) => setTimeout(resolve, 1500));
+                const runResponse = await fetch(`/api/runs/${queuedRunId}?include_artifact=1`, { cache: "no-store" });
+                const runData = await runResponse.json() as {
+                    error?: string;
+                    run?: RunRecordPayload;
+                    artifact?: unknown;
+                };
+
+                if (!runResponse.ok || runData.error || !runData.run) {
+                    throw new Error(runData.error || `Run status failed (${runResponse.status})`);
+                }
+
+                setRunJobStatus(runData.run.status);
+
+                if (runData.run.status === "failed" || runData.run.status === "cancelled") {
+                    throw new Error(runData.run.error?.message || "Factor run failed.");
+                }
+                if (runData.run.status === "succeeded") {
+                    if (!runData.artifact || typeof runData.artifact !== "object" || Array.isArray(runData.artifact)) {
+                        throw new Error("Run succeeded but no artifact payload was found.");
+                    }
+                    finalArtifact = runData.artifact as FactorLabResult;
+                    break;
+                }
             }
 
-            setResult(data);
-            setPublishName(`factor_lab_${data.meta.factors.map((factor) => factor.name).slice(0, 2).join("_") || "custom"}`);
+            if (!finalArtifact) {
+                throw new Error("Factor run timed out while waiting for completion.");
+            }
+
+            setResult(finalArtifact);
+            setPublishName(`factor_lab_${finalArtifact.meta.factors.map((factor) => factor.name).slice(0, 2).join("_") || "custom"}`);
         } catch (err) {
             setRunError(err instanceof Error ? err.message : "Unknown error");
+            setRunJobStatus("failed");
         } finally {
             setRunLoading(false);
         }
@@ -771,6 +845,20 @@ export default function FactorLabPage() {
                         </div>
                     )}
 
+                    <RunStatusPanel
+                        title="Factor Run"
+                        runId={runJobId}
+                        status={runJobStatus}
+                        loading={runLoading}
+                        error={null}
+                    />
+
+                    <RunHistoryList
+                        kind="factor_lab"
+                        title="Recent Factor Lab Runs"
+                        limit={6}
+                    />
+
                     {publishError && (
                         <div className="glass-card" style={{ padding: 14, marginBottom: 14, borderColor: "rgba(244,63,94,0.4)" }}>
                             <strong style={{ color: "var(--accent-rose)" }}>Publish failed:</strong> {publishError}
@@ -867,6 +955,51 @@ export default function FactorLabPage() {
                                     </div>
                                 </div>
                             </div>
+
+                            {result.analytics_v2 && (
+                                <div style={{ marginTop: 14 }}>
+                                    <h3 style={{ margin: "0 0 8px", fontSize: "0.95rem" }}>Detailed Analytics (v2)</h3>
+                                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginBottom: 10 }}>
+                                        <MetricCard label="Current DD" value={formatPercent(Number(result.analytics_v2.drawdown?.current_dd ?? NaN))} />
+                                        <MetricCard label="VaR 95%" value={formatPercent(Number(result.analytics_v2.tail_risk?.var_95 ?? NaN))} />
+                                        <MetricCard label="CVaR 95%" value={formatPercent(Number(result.analytics_v2.tail_risk?.cvar_95 ?? NaN))} />
+                                        <MetricCard label="Correlation" value={formatNumber(Number(result.analytics_v2.benchmark?.correlation ?? NaN), 2)} />
+                                        <MetricCard label="Info Ratio" value={formatNumber(Number(result.analytics_v2.benchmark?.information_ratio ?? NaN), 2)} />
+                                        <MetricCard label="Avg Turnover" value={formatNumber(Number(result.analytics_v2.turnover?.avg_turnover ?? NaN), 2)} />
+                                    </div>
+
+                                    {Array.isArray(result.analytics_v2.yearly) && result.analytics_v2.yearly.length > 0 && (
+                                        <div style={{ overflowX: "auto" }}>
+                                            <table className="data-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Year</th>
+                                                        <th>Return</th>
+                                                        <th>Vol</th>
+                                                        <th>Sharpe</th>
+                                                        <th>Max DD</th>
+                                                        <th>Win Rate</th>
+                                                        <th>Days</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {result.analytics_v2.yearly.map((row, idx) => (
+                                                        <tr key={`yearly-${idx}`}>
+                                                            <td>{String(row.year ?? "—")}</td>
+                                                            <td>{formatPercent(Number(row.return ?? NaN))}</td>
+                                                            <td>{formatPercent(Number(row.volatility ?? NaN))}</td>
+                                                            <td>{formatNumber(Number(row.sharpe ?? NaN), 2)}</td>
+                                                            <td>{formatPercent(Number(row.max_dd ?? NaN))}</td>
+                                                            <td>{formatPercent(Number(row.win_rate ?? NaN))}</td>
+                                                            <td>{String(row.trading_days ?? "—")}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>

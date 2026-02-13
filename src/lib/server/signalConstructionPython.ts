@@ -1,5 +1,8 @@
 import { spawn } from "child_process";
 import path from "path";
+import type { SignalConstructionPayload } from "@/lib/contracts/signal";
+import { parseEngineEnvelope, type EngineEnvelope } from "@/lib/contracts/run";
+import { elapsedMs, resolveTraceId, telemetryError, telemetryInfo } from "@/lib/server/telemetry";
 
 const PYTHON_SCRIPT = path.resolve(process.cwd(), "dashboard", "signal_construction_api.py");
 const REMOTE_ENGINE_URL = (process.env.SIGNAL_ENGINE_URL || "").trim();
@@ -9,19 +12,6 @@ const LOCAL_SIGNAL_API_PATHS = [
     "/api/signal_construction",
     "/api/index.py/api/signal_construction",
 ];
-
-export interface SignalConstructionPayload {
-    universe?: string;
-    symbols?: string[] | string;
-    period?: string;
-    interval?: string;
-    max_symbols?: number;
-    top_n?: number;
-    buy_threshold?: number;
-    sell_threshold?: number;
-    indicators?: Record<string, { enabled?: boolean; params?: Record<string, number> }>;
-    _mode?: "construct" | "backtest";
-}
 
 function asErrorMessage(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
@@ -55,10 +45,10 @@ function buildRemoteCandidates(): string[] {
     return Array.from(new Set(candidates.map((url) => url.trim()).filter(Boolean)));
 }
 
-async function executeRemoteSignalEngine(
+async function executeRemoteSignalEngine<TResult>(
     url: string,
     payload: SignalConstructionPayload
-): Promise<Record<string, unknown>> {
+): Promise<EngineEnvelope<TResult>> {
     const response = await fetch(url, {
         method: "POST",
         headers: {
@@ -91,7 +81,7 @@ async function executeRemoteSignalEngine(
             : `Remote signal engine failed (${response.status}) at ${url}`;
         throw new Error(remoteError);
     }
-    return result;
+    return parseEngineEnvelope<TResult>(result);
 }
 
 function parseJsonFromStdout(stdout: string): Record<string, unknown> {
@@ -129,7 +119,7 @@ function parseJsonFromStdout(stdout: string): Record<string, unknown> {
     throw new Error(`Failed to parse Python output as JSON: ${trimmed}`);
 }
 
-async function executeLocal(payload: SignalConstructionPayload): Promise<Record<string, unknown>> {
+async function executeLocal<TResult>(payload: SignalConstructionPayload): Promise<EngineEnvelope<TResult>> {
     return new Promise((resolve, reject) => {
         const child = spawn("python3", [PYTHON_SCRIPT], {
             cwd: path.dirname(PYTHON_SCRIPT),
@@ -164,7 +154,7 @@ async function executeLocal(payload: SignalConstructionPayload): Promise<Record<
             }
 
             try {
-                resolve(parseJsonFromStdout(stdout));
+                resolve(parseEngineEnvelope<TResult>(parseJsonFromStdout(stdout)));
             } catch (err) {
                 const message = err instanceof Error ? err.message : String(err);
                 reject(new Error(`${message}\nStderr: ${stderr || "(none)"}`));
@@ -181,23 +171,68 @@ async function executeLocal(payload: SignalConstructionPayload): Promise<Record<
     });
 }
 
-export async function executeSignalPython(payload: SignalConstructionPayload): Promise<Record<string, unknown>> {
+export async function executeSignalPython<TResult = Record<string, unknown>>(
+    payload: SignalConstructionPayload
+): Promise<EngineEnvelope<TResult>> {
+    const payloadRecord = payload as Record<string, unknown>;
+    const traceId = resolveTraceId(payloadRecord.trace_id, payloadRecord.run_id);
+    const requestedRunId = typeof payloadRecord.run_id === "string" ? payloadRecord.run_id : undefined;
     const remoteCandidates = buildRemoteCandidates();
+
+    telemetryInfo("engine.signal.request", {
+        trace_id: traceId,
+        run_id: requestedRunId,
+        mode: payload._mode || "construct",
+        remote_candidates: remoteCandidates.length,
+    });
+
+    const localStartedAt = Date.now();
     try {
-        return await executeLocal(payload);
+        const envelope = await executeLocal<TResult>(payload);
+        telemetryInfo("engine.signal.local.success", {
+            trace_id: traceId,
+            run_id: requestedRunId || envelope.run_id,
+            duration_ms: elapsedMs(localStartedAt),
+        });
+        return envelope;
     } catch (localErr) {
+        telemetryError("engine.signal.local.failed", localErr, {
+            trace_id: traceId,
+            run_id: requestedRunId,
+            duration_ms: elapsedMs(localStartedAt),
+        });
+
         const remoteErrors: string[] = [];
         for (const url of remoteCandidates) {
+            const remoteStartedAt = Date.now();
             try {
-                return await executeRemoteSignalEngine(url, payload);
+                const envelope = await executeRemoteSignalEngine<TResult>(url, payload);
+                telemetryInfo("engine.signal.remote.success", {
+                    trace_id: traceId,
+                    run_id: requestedRunId || envelope.run_id,
+                    url,
+                    duration_ms: elapsedMs(remoteStartedAt),
+                });
+                return envelope;
             } catch (err) {
                 remoteErrors.push(`${url} -> ${asErrorMessage(err)}`);
+                telemetryError("engine.signal.remote.failed", err, {
+                    trace_id: traceId,
+                    run_id: requestedRunId,
+                    url,
+                    duration_ms: elapsedMs(remoteStartedAt),
+                });
             }
         }
 
         const details = [`local python -> ${asErrorMessage(localErr)}`, ...remoteErrors]
             .map((entry, idx) => `${idx + 1}. ${entry}`)
             .join("\n");
+        telemetryError("engine.signal.failed", localErr, {
+            trace_id: traceId,
+            run_id: requestedRunId,
+            attempts: 1 + remoteCandidates.length,
+        });
         throw new Error(`Signal engine failed for all execution paths.\n${details}`);
     }
 }

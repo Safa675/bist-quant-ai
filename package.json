@@ -6,7 +6,8 @@
     "dev": "NODE_OPTIONS='--dns-result-order=ipv4first' next dev",
     "build": "NODE_OPTIONS='--dns-result-order=ipv4first' next build",
     "start": "NODE_OPTIONS='--dns-result-order=ipv4first' next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:parity": "node tests/parity/run-parity.mjs"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

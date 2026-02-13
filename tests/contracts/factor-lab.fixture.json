@@ -1,0 +1,131 @@
+{
+  "run_id": "factor_lab_fixture_001",
+  "meta": {
+    "timestamp": "2026-02-13T15:00:00.000Z",
+    "mode": "run",
+    "engine": "local_python",
+    "trace_id": "trace-factor-fixture-001"
+  },
+  "result": {
+    "meta": {
+      "mode": "run",
+      "as_of": "2026-02-13T15:00:00.000Z",
+      "start_date": "2019-01-01",
+      "end_date": "2025-12-31",
+      "rebalance_frequency": "monthly",
+      "top_n": 20,
+      "symbols_used": 120,
+      "rows_used": 85620,
+      "execution_ms": 4321,
+      "factors": [
+        {
+          "name": "momentum",
+          "weight": 1,
+          "signal_params": {
+            "lookback_days": 252,
+            "skip_days": 21,
+            "vol_lookback": 252
+          }
+        },
+        {
+          "name": "value",
+          "weight": 1,
+          "signal_params": {
+            "ep_weight": 1,
+            "fcf_p_weight": 1,
+            "ocf_ev_weight": 1,
+            "sp_weight": 1,
+            "ebitda_ev_weight": 1
+          }
+        }
+      ]
+    },
+    "metrics": {
+      "cagr": 21.5,
+      "sharpe": 1.42,
+      "sortino": 2.01,
+      "max_dd": -18.3,
+      "total_return": 245.7,
+      "win_rate": 55.1,
+      "beta": 0.82,
+      "rebalance_count": 84,
+      "trade_count": 1260
+    },
+    "composite_top": [
+      { "symbol": "AKBNK.IS", "score": 2.18 },
+      { "symbol": "KCHOL.IS", "score": 2.09 },
+      { "symbol": "TUPRS.IS", "score": 1.97 }
+    ],
+    "factor_top_symbols": {
+      "momentum": [
+        { "symbol": "AKBNK.IS", "score": 1.33 },
+        { "symbol": "TUPRS.IS", "score": 1.22 }
+      ],
+      "value": [
+        { "symbol": "KCHOL.IS", "score": 0.88 },
+        { "symbol": "THYAO.IS", "score": 0.81 }
+      ]
+    },
+    "current_holdings": ["AKBNK.IS", "KCHOL.IS", "TUPRS.IS", "THYAO.IS"],
+    "equity_curve": [
+      { "date": "2025-12-29", "value": 196.4 },
+      { "date": "2025-12-30", "value": 197.3 },
+      { "date": "2025-12-31", "value": 198.2 }
+    ],
+    "benchmark_curve": [
+      { "date": "2025-12-29", "value": 164.8 },
+      { "date": "2025-12-30", "value": 165.1 },
+      { "date": "2025-12-31", "value": 165.4 }
+    ],
+    "analytics_v2": {
+      "summary": {
+        "observations": 1750,
+        "start": "2019-01-02",
+        "end": "2025-12-31",
+        "positive_days": 941,
+        "negative_days": 809,
+        "flat_days": 0
+      },
+      "yearly": [
+        {
+          "year": 2025,
+          "return": 31.2,
+          "volatility": 22.4,
+          "sharpe": 1.39,
+          "max_dd": -10.2,
+          "win_rate": 56.0,
+          "trading_days": 252
+        }
+      ],
+      "monthly": [
+        { "year": 2025, "month": 12, "return": 2.1 }
+      ],
+      "drawdown": {
+        "current_dd": -1.8,
+        "max_dd": -18.3,
+        "avg_dd": -4.5,
+        "max_duration_days": 74
+      },
+      "tail_risk": {
+        "var_95": -2.7,
+        "cvar_95": -3.8,
+        "skew": -0.11,
+        "kurtosis": 3.1,
+        "best_day": 4.6,
+        "worst_day": -5.1
+      },
+      "benchmark": {
+        "beta": 0.82,
+        "correlation": 0.71,
+        "tracking_error": 11.4,
+        "information_ratio": 0.66
+      },
+      "turnover": {
+        "avg_positions": 20,
+        "avg_turnover": 0.24,
+        "rebalance_events": 84
+      }
+    }
+  },
+  "error": null
+}

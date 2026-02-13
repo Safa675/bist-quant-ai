@@ -1,5 +1,8 @@
 import { spawn } from "child_process";
 import path from "path";
+import type { StockFilterPayload } from "@/lib/contracts/screener";
+import { parseEngineEnvelope, type EngineEnvelope } from "@/lib/contracts/run";
+import { elapsedMs, resolveTraceId, telemetryError, telemetryInfo } from "@/lib/server/telemetry";
 
 const PYTHON_SCRIPT = path.resolve(process.cwd(), "dashboard", "stock_filter_api.py");
 const REMOTE_ENGINE_URL = (process.env.STOCK_FILTER_ENGINE_URL || "").trim();
@@ -9,20 +12,6 @@ const LOCAL_STOCK_FILTER_API_PATHS = [
     "/api/stock_filter",
     "/api/index.py/api/stock_filter",
 ];
-
-export interface StockFilterPayload {
-    _mode?: "meta" | "run";
-    template?: string;
-    sector?: string;
-    index?: string;
-    recommendation?: string;
-    sort_by?: string;
-    sort_desc?: boolean;
-    limit?: number;
-    columns?: string[];
-    filters?: Record<string, { min?: number | null; max?: number | null }>;
-    percentile_filters?: Record<string, { min_pct?: number | null; max_pct?: number | null }>;
-}
 
 function asErrorMessage(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
@@ -91,7 +80,10 @@ function parseJsonFromStdout(stdout: string): Record<string, unknown> {
     throw new Error(`Failed to parse Python output as JSON: ${trimmed}`);
 }
 
-async function executeRemote(url: string, payload: StockFilterPayload): Promise<Record<string, unknown>> {
+async function executeRemote<TResult>(
+    url: string,
+    payload: StockFilterPayload
+): Promise<EngineEnvelope<TResult>> {
     const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -124,10 +116,10 @@ async function executeRemote(url: string, payload: StockFilterPayload): Promise<
         throw new Error(msg);
     }
 
-    return result;
+    return parseEngineEnvelope<TResult>(result);
 }
 
-async function executeLocal(payload: StockFilterPayload): Promise<Record<string, unknown>> {
+async function executeLocal<TResult>(payload: StockFilterPayload): Promise<EngineEnvelope<TResult>> {
     return new Promise((resolve, reject) => {
         const child = spawn("python3", [PYTHON_SCRIPT], {
             cwd: path.dirname(PYTHON_SCRIPT),
@@ -162,7 +154,7 @@ async function executeLocal(payload: StockFilterPayload): Promise<Record<string,
             }
 
             try {
-                resolve(parseJsonFromStdout(stdout));
+                resolve(parseEngineEnvelope<TResult>(parseJsonFromStdout(stdout)));
             } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
                 reject(new Error(`${msg}\nStderr: ${stderr || "(none)"}`));
@@ -174,25 +166,69 @@ async function executeLocal(payload: StockFilterPayload): Promise<Record<string,
     });
 }
 
-export async function executeStockFilterPython(payload: StockFilterPayload): Promise<Record<string, unknown>> {
+export async function executeStockFilterPython<TResult = Record<string, unknown>>(
+    payload: StockFilterPayload
+): Promise<EngineEnvelope<TResult>> {
+    const payloadRecord = payload as Record<string, unknown>;
+    const traceId = resolveTraceId(payloadRecord.trace_id, payloadRecord.run_id);
+    const requestedRunId = typeof payloadRecord.run_id === "string" ? payloadRecord.run_id : undefined;
     const remoteCandidates = buildRemoteCandidates();
 
+    telemetryInfo("engine.stock_filter.request", {
+        trace_id: traceId,
+        run_id: requestedRunId,
+        mode: payload._mode || "run",
+        remote_candidates: remoteCandidates.length,
+    });
+
     // Always prefer local python for consistency with local codebase.
+    const localStartedAt = Date.now();
     try {
-        return await executeLocal(payload);
+        const envelope = await executeLocal<TResult>(payload);
+        telemetryInfo("engine.stock_filter.local.success", {
+            trace_id: traceId,
+            run_id: requestedRunId || envelope.run_id,
+            duration_ms: elapsedMs(localStartedAt),
+        });
+        return envelope;
     } catch (localErr) {
+        telemetryError("engine.stock_filter.local.failed", localErr, {
+            trace_id: traceId,
+            run_id: requestedRunId,
+            duration_ms: elapsedMs(localStartedAt),
+        });
+
         const remoteErrors: string[] = [];
         for (const url of remoteCandidates) {
+            const remoteStartedAt = Date.now();
             try {
-                return await executeRemote(url, payload);
+                const envelope = await executeRemote<TResult>(url, payload);
+                telemetryInfo("engine.stock_filter.remote.success", {
+                    trace_id: traceId,
+                    run_id: requestedRunId || envelope.run_id,
+                    url,
+                    duration_ms: elapsedMs(remoteStartedAt),
+                });
+                return envelope;
             } catch (err) {
                 remoteErrors.push(`${url} -> ${asErrorMessage(err)}`);
+                telemetryError("engine.stock_filter.remote.failed", err, {
+                    trace_id: traceId,
+                    run_id: requestedRunId,
+                    url,
+                    duration_ms: elapsedMs(remoteStartedAt),
+                });
             }
         }
 
         const details = [`local python -> ${asErrorMessage(localErr)}`, ...remoteErrors]
             .map((entry, idx) => `${idx + 1}. ${entry}`)
             .join("\n");
+        telemetryError("engine.stock_filter.failed", localErr, {
+            trace_id: traceId,
+            run_id: requestedRunId,
+            attempts: 1 + remoteCandidates.length,
+        });
         throw new Error(`Stock filter engine failed for all execution paths.\n${details}`);
     }
 }

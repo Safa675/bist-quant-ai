@@ -23,6 +23,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from analytics_payloads import build_backtest_analytics_v2
+from common_response import error_response, generate_run_id, success_response
 
 APP_ROOT = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = APP_ROOT
@@ -473,6 +475,7 @@ def _build_response(payload: dict[str, Any]) -> dict[str, Any]:
     equity = results["equity"].dropna()
 
     xu100_curve: list[dict[str, Any]] = []
+    xu100_returns = pd.Series(dtype="float64")
     beta = None
     if engine.xu100_prices is not None and not returns.empty:
         xu100 = engine.xu100_prices.reindex(returns.index).ffill()
@@ -502,6 +505,12 @@ def _build_response(payload: dict[str, Any]) -> dict[str, Any]:
     as_of_iso = as_of.isoformat() if hasattr(as_of, "isoformat") else str(as_of)
 
     elapsed_ms = int((time.perf_counter() - started) * 1000)
+    analytics_v2 = build_backtest_analytics_v2(
+        returns=returns,
+        equity=equity,
+        benchmark_returns=xu100_returns,
+        holdings_history=results.get("holdings_history", []),
+    )
 
     return {
         "meta": {
@@ -532,12 +541,17 @@ def _build_response(payload: dict[str, Any]) -> dict[str, Any]:
         "current_holdings": _extract_current_holdings(results.get("holdings_history", []), limit=top_n),
         "equity_curve": equity_curve,
         "benchmark_curve": xu100_curve,
+        "analytics_v2": analytics_v2,
     }
 
 
 def _main() -> int:
+    run_id = generate_run_id("factor_lab")
     try:
         payload = _parse_payload()
+        requested_run_id = payload.get("run_id") if isinstance(payload, dict) else None
+        if isinstance(requested_run_id, str) and requested_run_id.strip():
+            run_id = requested_run_id.strip()
         mode = str(payload.get("_mode", "run")).strip().lower()
 
         if mode == "catalog":
@@ -554,10 +568,25 @@ def _main() -> int:
         else:
             response = _build_response(payload)
 
-        print(json.dumps(response, ensure_ascii=False))
+        envelope = success_response(
+            response,
+            run_id=run_id,
+            meta={
+                "engine": "factor_lab",
+                "mode": mode,
+            },
+        )
+        print(json.dumps(envelope, ensure_ascii=False))
         return 0
     except Exception as exc:
-        print(json.dumps({"error": str(exc)}, ensure_ascii=False))
+        envelope = error_response(
+            str(exc),
+            run_id=run_id,
+            meta={
+                "engine": "factor_lab",
+            },
+        )
+        print(json.dumps(envelope, ensure_ascii=False))
         return 0
 
 

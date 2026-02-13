@@ -34,6 +34,14 @@ interface DashboardData {
     displayed_signals: number;
     signals: Signal[];
     holdings: Record<string, string[]>;
+    recent_lab_runs?: Array<{
+        run_id?: string;
+        kind?: string;
+        cagr?: number | null;
+        sharpe?: number | null;
+        max_dd?: number | null;
+    }>;
+    recent_lab_runs_count?: number;
 }
 
 /* ---------- Component ---------- */
@@ -146,6 +154,11 @@ export default function DashboardPage() {
                             </h1>
                             <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
                                 <RegimeIndicator regime={data.current_regime} />
+                                {typeof data.recent_lab_runs_count === "number" && (
+                                    <span className="badge" style={{ background: "var(--accent-cyan-dim)", color: "var(--accent-cyan)" }}>
+                                        Lab runs: {data.recent_lab_runs_count}
+                                    </span>
+                                )}
                                 <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "0.8rem", color: "var(--text-muted)" }}>
                                     <Clock size={13} />
                                     Updated {data.last_update}

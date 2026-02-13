@@ -1,0 +1,140 @@
+{
+  "run_id": "signal_backtest_fixture_001",
+  "meta": {
+    "timestamp": "2026-02-13T15:05:00.000Z",
+    "mode": "backtest",
+    "engine": "local_python",
+    "trace_id": "trace-signal-fixture-001"
+  },
+  "result": {
+    "meta": {
+      "mode": "backtest",
+      "universe": "XU100",
+      "period": "2y",
+      "interval": "1d",
+      "symbols_used": 100,
+      "rows_used": 50400,
+      "as_of": "2026-02-13T15:05:00.000Z",
+      "indicators": ["rsi", "macd", "supertrend"],
+      "buy_threshold": 0.2,
+      "sell_threshold": -0.2,
+      "max_positions": 20,
+      "execution_ms": 2890
+    },
+    "metrics": {
+      "cagr": 18.7,
+      "sharpe": 1.21,
+      "max_dd": -14.8,
+      "ytd": 6.5,
+      "total_return": 46.9,
+      "volatility": 19.2,
+      "win_rate": 53.6,
+      "beta": 0.91,
+      "last_rebalance": "2026-02-01"
+    },
+    "signals": [
+      {
+        "symbol": "AKBNK.IS",
+        "action": "buy",
+        "combined_score": 0.74,
+        "buy_votes": 3,
+        "sell_votes": 0,
+        "hold_votes": 0,
+        "indicator_values": {
+          "rsi": 32.1,
+          "macd": 0.08,
+          "supertrend": 1
+        },
+        "indicator_signals": {
+          "rsi": 1,
+          "macd": 1,
+          "supertrend": 1
+        }
+      },
+      {
+        "symbol": "KCHOL.IS",
+        "action": "hold",
+        "combined_score": 0.16,
+        "buy_votes": 1,
+        "sell_votes": 0,
+        "hold_votes": 2,
+        "indicator_values": {
+          "rsi": 47.9,
+          "macd": 0.01,
+          "supertrend": 1
+        },
+        "indicator_signals": {
+          "rsi": 0,
+          "macd": 1,
+          "supertrend": 0
+        }
+      }
+    ],
+    "indicator_summaries": [
+      { "name": "rsi", "buy_count": 34, "sell_count": 21, "hold_count": 45 },
+      { "name": "macd", "buy_count": 39, "sell_count": 25, "hold_count": 36 },
+      { "name": "supertrend", "buy_count": 51, "sell_count": 19, "hold_count": 30 }
+    ],
+    "current_holdings": ["AKBNK.IS", "KCHOL.IS", "THYAO.IS", "TUPRS.IS"],
+    "equity_curve": [
+      { "date": "2025-12-29", "value": 143.2 },
+      { "date": "2025-12-30", "value": 143.5 },
+      { "date": "2025-12-31", "value": 144.0 }
+    ],
+    "benchmark_curve": [
+      { "date": "2025-12-29", "value": 131.7 },
+      { "date": "2025-12-30", "value": 132.0 },
+      { "date": "2025-12-31", "value": 132.3 }
+    ],
+    "analytics_v2": {
+      "summary": {
+        "observations": 504,
+        "start": "2024-01-02",
+        "end": "2025-12-31",
+        "positive_days": 274,
+        "negative_days": 230,
+        "flat_days": 0
+      },
+      "yearly": [
+        {
+          "year": 2025,
+          "return": 19.8,
+          "volatility": 18.1,
+          "sharpe": 1.18,
+          "max_dd": -11.2,
+          "win_rate": 54.4,
+          "trading_days": 252
+        }
+      ],
+      "monthly": [
+        { "year": 2025, "month": 12, "return": 1.6 }
+      ],
+      "drawdown": {
+        "current_dd": -1.2,
+        "max_dd": -14.8,
+        "avg_dd": -3.7,
+        "max_duration_days": 48
+      },
+      "tail_risk": {
+        "var_95": -2.2,
+        "cvar_95": -3.3,
+        "skew": -0.09,
+        "kurtosis": 2.9,
+        "best_day": 3.9,
+        "worst_day": -4.4
+      },
+      "benchmark": {
+        "beta": 0.91,
+        "correlation": 0.77,
+        "tracking_error": 8.6,
+        "information_ratio": 0.52
+      },
+      "turnover": {
+        "avg_positions": 20,
+        "avg_turnover": 0.31,
+        "rebalance_events": 24
+      }
+    }
+  },
+  "error": null
+}

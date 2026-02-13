@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { type AgentType, generateAgentResponse } from "@/lib/agents/orchestrator";
 import { createRequestId, logError, logInfo, safeErrorMessage } from "@/lib/agents/logging";
 import { generateToolEnabledAgentResponse } from "@/lib/agents/tool-orchestrator";
+import { getAgentToolPolicy } from "@/lib/agents/policy";
 import { buildFallbackContext, loadDashboardData, resolveContext } from "./_shared";
 
 function prettyAgentName(agent: AgentType): string {
@@ -75,7 +76,13 @@ export function createAgentPostHandler(agent: AgentType) {
 
             let result;
             try {
-                result = await generateToolEnabledAgentResponse(agent, query, context, { requestId });
+                const toolPolicy = getAgentToolPolicy(agent);
+                result = await generateToolEnabledAgentResponse(agent, query, context, {
+                    requestId,
+                    maxToolCalls: toolPolicy.maxToolCalls,
+                    maxRetries: toolPolicy.maxRetries,
+                    maxConsecutiveToolFailures: toolPolicy.maxConsecutiveToolFailures,
+                });
             } catch (toolError) {
                 logError("agent.tool_mode.failed_fallback", {
                     requestId,

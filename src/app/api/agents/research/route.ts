@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createRequestId, logError, logInfo, safeErrorMessage } from "@/lib/agents/logging";
 import { generateToolEnabledAgentResponse } from "@/lib/agents/tool-orchestrator";
+import { getAgentToolPolicy } from "@/lib/agents/policy";
 import { buildFallbackContext, loadDashboardData, resolveContext } from "../_shared";
 
 export async function POST(request: NextRequest) {
@@ -48,7 +49,13 @@ export async function POST(request: NextRequest) {
             holdingsFactorCount: Object.keys(context.holdings).length,
         });
 
-        const result = await generateToolEnabledAgentResponse("research", query, context, { requestId });
+        const toolPolicy = getAgentToolPolicy("research");
+        const result = await generateToolEnabledAgentResponse("research", query, context, {
+            requestId,
+            maxToolCalls: toolPolicy.maxToolCalls,
+            maxRetries: toolPolicy.maxRetries,
+            maxConsecutiveToolFailures: toolPolicy.maxConsecutiveToolFailures,
+        });
         const latencyMs = Date.now() - startedAt;
 
         logInfo("research.request.completed", {

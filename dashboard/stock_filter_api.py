@@ -21,6 +21,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from common_response import error_response, generate_run_id, success_response
+
 
 APP_ROOT = Path(__file__).resolve().parent.parent
 if str(APP_ROOT) not in sys.path:
@@ -368,8 +370,12 @@ def _run_response(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _main() -> int:
+    run_id = generate_run_id("stock_filter")
     try:
         payload = _parse_payload()
+        requested_run_id = payload.get("run_id") if isinstance(payload, dict) else None
+        if isinstance(requested_run_id, str) and requested_run_id.strip():
+            run_id = requested_run_id.strip()
         mode = str(payload.get("_mode") or "run").strip().lower()
 
         if mode == "meta":
@@ -377,10 +383,25 @@ def _main() -> int:
         else:
             response = _run_response(payload)
 
-        print(json.dumps(response, ensure_ascii=False))
+        envelope = success_response(
+            response,
+            run_id=run_id,
+            meta={
+                "engine": "stock_filter",
+                "mode": mode,
+            },
+        )
+        print(json.dumps(envelope, ensure_ascii=False))
         return 0
     except Exception as exc:
-        print(json.dumps({"error": _friendly_error(exc)}, ensure_ascii=False))
+        envelope = error_response(
+            _friendly_error(exc),
+            run_id=run_id,
+            meta={
+                "engine": "stock_filter",
+            },
+        )
+        print(json.dumps(envelope, ensure_ascii=False))
         return 0
 
 
