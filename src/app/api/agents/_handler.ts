@@ -55,6 +55,24 @@ export function createAgentPostHandler(agent: AgentType) {
                 holdingsFactorCount: Object.keys(context.holdings).length,
             });
 
+            const getSafeFallbackResponse = async (reason: string): Promise<string> => {
+                try {
+                    const fallback = await generateAgentResponse(agent, query, context, { requestId });
+                    if (typeof fallback === "string" && fallback.trim()) {
+                        return fallback;
+                    }
+                } catch (fallbackError) {
+                    logError("agent.fallback.failed", {
+                        requestId,
+                        agent,
+                        path: request.nextUrl.pathname,
+                        reason,
+                        message: safeErrorMessage(fallbackError),
+                    });
+                }
+                return `I couldn't generate a full response right now (${reason}). Please retry in a few seconds.`;
+            };
+
             let result;
             try {
                 result = await generateToolEnabledAgentResponse(agent, query, context, { requestId });
@@ -65,7 +83,7 @@ export function createAgentPostHandler(agent: AgentType) {
                     path: request.nextUrl.pathname,
                     message: safeErrorMessage(toolError),
                 });
-                const fallback = await generateAgentResponse(agent, query, context, { requestId });
+                const fallback = await getSafeFallbackResponse("tool-mode failure");
                 result = {
                     response: fallback,
                     toolsUsed: [] as string[],
@@ -78,7 +96,7 @@ export function createAgentPostHandler(agent: AgentType) {
                 };
             }
             if (!result.response || !result.response.trim()) {
-                const fallback = await generateAgentResponse(agent, query, context, { requestId });
+                const fallback = await getSafeFallbackResponse("empty tool response");
                 result = {
                     response: fallback,
                     toolsUsed: result.toolsUsed,
