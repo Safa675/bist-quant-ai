@@ -30,14 +30,14 @@ function asErrorMessage(err: unknown): string {
 }
 
 function getBaseUrl(): string {
-    const vercelUrl = (process.env.VERCEL_URL || "").trim();
-    if (vercelUrl) {
-        return `https://${vercelUrl}`;
-    }
-
     const publicAppUrl = (process.env.NEXT_PUBLIC_APP_URL || "").trim();
     if (publicAppUrl) {
         return publicAppUrl.replace(/\/+$/, "");
+    }
+
+    const vercelUrl = (process.env.VERCEL_URL || "").trim();
+    if (vercelUrl) {
+        return `https://${vercelUrl}`;
     }
 
     return "http://localhost:3000";
