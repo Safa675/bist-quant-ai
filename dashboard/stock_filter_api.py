@@ -21,7 +21,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from common_response import error_response, generate_run_id, success_response
+try:
+    from common_response import error_response, generate_run_id, success_response
+except ModuleNotFoundError:
+    # Supports module loading via api/index.py (repo root on sys.path).
+    from dashboard.common_response import error_response, generate_run_id, success_response
 
 
 APP_ROOT = Path(__file__).resolve().parent.parent
@@ -377,6 +381,8 @@ def _main() -> int:
         if isinstance(requested_run_id, str) and requested_run_id.strip():
             run_id = requested_run_id.strip()
         mode = str(payload.get("_mode") or "run").strip().lower()
+        if mode not in {"run", "meta"}:
+            raise ValueError("Unsupported mode. Use 'run' or 'meta'.")
 
         if mode == "meta":
             response = _meta_response()

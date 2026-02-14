@@ -23,8 +23,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from analytics_payloads import build_backtest_analytics_v2
-from common_response import error_response, generate_run_id, success_response
+try:
+    from analytics_payloads import build_backtest_analytics_v2
+    from common_response import error_response, generate_run_id, success_response
+except ModuleNotFoundError:
+    # Supports module loading via api/index.py (repo root on sys.path).
+    from dashboard.analytics_payloads import build_backtest_analytics_v2
+    from dashboard.common_response import error_response, generate_run_id, success_response
 
 APP_ROOT = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = APP_ROOT
@@ -150,9 +155,12 @@ def _safe_float(value: Any) -> float | None:
     try:
         if value is None:
             return None
-        if pd.isna(value):
+        parsed = float(value)
+        if not np.isfinite(parsed):
             return None
-        return float(value)
+        if pd.isna(parsed):
+            return None
+        return parsed
     except Exception:
         return None
 
@@ -182,7 +190,7 @@ def _as_int(value: Any, default: int, minimum: int | None = None, maximum: int |
 def _as_float(value: Any, default: float) -> float:
     try:
         parsed = float(value)
-        if np.isnan(parsed):
+        if not np.isfinite(parsed):
             return default
         return parsed
     except Exception:
@@ -220,7 +228,7 @@ def _normalize_factor_entries(raw: Any, available: set[str]) -> list[dict[str, A
         if not isinstance(signal_params, dict):
             signal_params = {}
 
-        if enabled and weight > 0:
+        if enabled and np.isfinite(weight) and weight > 0:
             entries.append(
                 {
                     "name": name,
@@ -237,7 +245,17 @@ def _normalize_factor_entries(raw: Any, available: set[str]) -> list[dict[str, A
 
 
 def _normalize_weights(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    total = sum(max(0.0, float(item.get("weight", 0.0))) for item in entries)
+    cleaned_weights: list[float] = []
+    for item in entries:
+        try:
+            weight = float(item.get("weight", 0.0))
+        except Exception:
+            weight = 0.0
+        if not np.isfinite(weight) or weight < 0.0:
+            weight = 0.0
+        cleaned_weights.append(weight)
+
+    total = float(sum(cleaned_weights))
     if total <= 0:
         n = len(entries)
         if n == 0:
@@ -247,8 +265,8 @@ def _normalize_weights(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
             item["weight"] = equal
         return entries
 
-    for item in entries:
-        item["weight"] = max(0.0, float(item.get("weight", 0.0))) / total
+    for item, weight in zip(entries, cleaned_weights):
+        item["weight"] = weight / total
     return entries
 
 
@@ -553,6 +571,8 @@ def _main() -> int:
         if isinstance(requested_run_id, str) and requested_run_id.strip():
             run_id = requested_run_id.strip()
         mode = str(payload.get("_mode", "run")).strip().lower()
+        if mode not in {"run", "catalog"}:
+            raise ValueError("Unsupported mode. Use 'run' or 'catalog'.")
 
         if mode == "catalog":
             engine = PortfolioEngine(

@@ -142,7 +142,9 @@ def coerce_quarter_cols(row: pd.Series) -> pd.Series:
                         continue
                     if month not in [3, 6, 9, 12]:
                         continue
-                    dt = pd.Timestamp(year=year, month=month, day=1)
+                    # Use month-end date (quarter end), not day=1
+                    # This is critical for correct lag calculation
+                    dt = pd.Timestamp(year=year, month=month, day=1) + pd.offsets.MonthEnd(0)
                     val = row[col]
                     if pd.notna(val):
                         try:
@@ -185,11 +187,19 @@ def sum_ttm(series: pd.Series) -> pd.Series:
     
     # Rolling 4-quarter sum with min_periods=3 (allows 1 missing quarter)
     ttm = series.rolling(window=4, min_periods=3).sum()
-    
+
     # For cases with only 3 quarters, scale up to annual estimate
+    # NOTE: This assumes the missing quarter is roughly equal to the average
+    # of available quarters. If the missing quarter was truly 0 (e.g., seasonal
+    # business with no Q4 revenue), this will overestimate TTM.
     valid_counts = series.rolling(window=4, min_periods=3).count()
-    ttm = ttm * (4 / valid_counts)
-    
+
+    # Only scale when we have exactly 3 quarters (not 4)
+    scale_factor = 4.0 / valid_counts
+    # Cap the scale factor to avoid extreme scaling with sparse data
+    scale_factor = scale_factor.clip(upper=4.0 / 3.0)
+    ttm = ttm * scale_factor
+
     return ttm.dropna()
 
 

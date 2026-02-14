@@ -17,6 +17,12 @@ function nextTick(fn: () => void): void {
     setTimeout(fn, 0);
 }
 
+function isInMemoryQueueDisabled(): boolean {
+    const forceDisable = process.env.RUNS_DISABLE_INMEM_QUEUE === "1";
+    const serverlessDisable = process.env.VERCEL === "1" && process.env.RUNS_ALLOW_INMEM_QUEUE !== "1";
+    return forceDisable || serverlessDisable;
+}
+
 async function processSingle(runId: string): Promise<void> {
     try {
         const run = await getRun(runId);
@@ -62,6 +68,10 @@ function pump(): void {
 }
 
 export async function enqueueRun(runId: string): Promise<{ position: number; alreadyQueued: boolean }> {
+    if (isInMemoryQueueDisabled()) {
+        throw new Error("In-memory queue is disabled in this environment. Use blocking execution.");
+    }
+
     const run = await getRun(runId);
     if (!run) {
         throw new Error(`Run not found: ${runId}`);

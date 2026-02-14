@@ -84,7 +84,9 @@ async function dispatchRun(kind: RunKind, request: Record<string, unknown>, runI
 }
 
 export async function executeRunNow(run: RunRecord): Promise<RunExecutionOutcome> {
-    const traceId = resolveTraceId(run.meta?.trace_id, run.id);
+    const requestTrace = isObjectRecord(run.request) ? run.request.trace_id : undefined;
+    const traceId = resolveTraceId(run.meta?.trace_id, requestTrace, run.id);
+    const startedAt = Date.now();
     const running = await markRunRunning(run.id, {
         executor: "sync_api",
         trace_id: traceId,
@@ -174,6 +176,7 @@ export async function executeRunNow(run: RunRecord): Promise<RunExecutionOutcome
             kind: activeRun.kind,
             engine_run_id: envelope.run_id,
             artifact_id: saved.artifact.id,
+            duration_ms: Date.now() - startedAt,
         });
 
         return {
@@ -187,8 +190,12 @@ export async function executeRunNow(run: RunRecord): Promise<RunExecutionOutcome
             trace_id: traceId,
             run_id: activeRun.id,
             kind: activeRun.kind,
+            duration_ms: Date.now() - startedAt,
         });
-        const failed = await markRunFailed(activeRun.id, engineError);
+        const failed = await markRunFailed(activeRun.id, engineError, {
+            trace_id: traceId,
+            executor: "sync_api",
+        });
 
         return {
             run: failed || {

@@ -26,6 +26,15 @@ function parsePositiveInt(raw: string | null, fallback: number): number {
     return parsed;
 }
 
+async function parseJsonObjectBody(request: NextRequest): Promise<Record<string, unknown> | null> {
+    try {
+        const body: unknown = await request.json();
+        return isObjectRecord(body) ? body : null;
+    } catch {
+        return null;
+    }
+}
+
 export async function GET(request: NextRequest) {
     const traceId = requestTraceId(request);
     telemetryInfo("api.runs.list.request", { trace_id: traceId });
@@ -78,9 +87,12 @@ export async function POST(request: NextRequest) {
 
     try {
         const startedAt = Date.now();
-        const body: unknown = await request.json();
-        if (!isObjectRecord(body)) {
-            telemetryInfo("api.runs.create.bad_request", { trace_id: traceId, reason: "non_object_body" });
+        const body = await parseJsonObjectBody(request);
+        if (!body) {
+            telemetryInfo("api.runs.create.bad_request", {
+                trace_id: traceId,
+                reason: "invalid_json_or_non_object",
+            });
             return NextResponse.json(
                 { error: "Request body must be a JSON object." },
                 { status: 400, headers: buildTraceHeaders(traceId) }

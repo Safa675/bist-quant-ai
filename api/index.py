@@ -83,11 +83,54 @@ def _error(message: str, status_code: int = 400) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status_code)
 
 
+def _error_envelope(
+    message: str,
+    *,
+    run_id: str,
+    engine: str,
+    mode: str | None = None,
+    status_code: int = 400,
+) -> JSONResponse:
+    meta = {"engine": engine}
+    if mode is not None:
+        meta["mode"] = mode
+    return JSONResponse(
+        error_response(message, run_id=run_id, meta=meta),
+        status_code=status_code,
+    )
+
+
 def _resolve_run_id(payload: Any, prefix: str) -> str:
     candidate = payload.get("run_id") if isinstance(payload, dict) else None
     if isinstance(candidate, str) and candidate.strip():
         return candidate.strip()
     return generate_run_id(prefix)
+
+
+def _validate_mode(mode: str, allowed: set[str]) -> str:
+    normalized = str(mode).strip().lower()
+    if normalized not in allowed:
+        allowed_text = ", ".join(sorted(allowed))
+        raise ValueError(f"Unsupported mode '{normalized}'. Use one of: {allowed_text}.")
+    return normalized
+
+
+def _contains_serverless_heavy_factors(payload: dict[str, Any]) -> bool:
+    factor_key = str(payload.get("factor_key", "")).strip().lower()
+    if factor_key == "five_factor_rotation" or factor_key.startswith("five_factor_axis_"):
+        return True
+
+    raw_factors = payload.get("factors")
+    if not isinstance(raw_factors, list):
+        return False
+
+    for item in raw_factors:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip().lower()
+        if name == "five_factor_rotation" or name.startswith("five_factor_axis_"):
+            return True
+    return False
 
 
 def _factor_catalog() -> dict[str, Any]:
@@ -152,11 +195,13 @@ async def get_factor_catalog() -> JSONResponse:
             meta={"engine": "factor_lab", "mode": "catalog"},
         ))
     except Exception as exc:
-        return JSONResponse(error_response(
+        return _error_envelope(
             str(exc),
             run_id=run_id,
-            meta={"engine": "factor_lab", "mode": "catalog"},
-        ))
+            engine="factor_lab",
+            mode="catalog",
+            status_code=500,
+        )
 
 
 @app.post("/api/factor_lab")
@@ -172,17 +217,27 @@ async def post_factor_run(request: Request) -> JSONResponse:
         return _error("Request body must be a JSON object.")
 
     run_id = _resolve_run_id(payload, "factor_lab")
-    mode = str(payload.get("_mode", "run")).strip().lower()
+    try:
+        mode = _validate_mode(payload.get("_mode", "run"), {"run", "catalog"})
+    except ValueError as exc:
+        return _error_envelope(
+            str(exc),
+            run_id=run_id,
+            engine="factor_lab",
+            mode=str(payload.get("_mode", "run")),
+            status_code=400,
+        )
 
     # Block heavy computation on Vercel
-    factor_key = payload.get("factor_key", "")
-    if factor_key == "five_factor_rotation":
-        return JSONResponse(error_response(
+    if _contains_serverless_heavy_factors(payload):
+        return _error_envelope(
             "five_factor_rotation is too computationally intensive for serverless. "
             "Use a different factor or deploy to a dedicated server.",
             run_id=run_id,
-            meta={"engine": "factor_lab", "mode": mode},
-        ))
+            engine="factor_lab",
+            mode=mode,
+            status_code=400,
+        )
 
     try:
         factor_lab_api = get_factor_lab_api()
@@ -201,17 +256,21 @@ async def post_factor_run(request: Request) -> JSONResponse:
             meta={"engine": "factor_lab", "mode": mode},
         ))
     except ValueError as exc:
-        return JSONResponse(error_response(
+        return _error_envelope(
             str(exc),
             run_id=run_id,
-            meta={"engine": "factor_lab", "mode": mode},
-        ))
+            engine="factor_lab",
+            mode=mode,
+            status_code=400,
+        )
     except Exception as exc:
-        return JSONResponse(error_response(
+        return _error_envelope(
             str(exc),
             run_id=run_id,
-            meta={"engine": "factor_lab", "mode": mode},
-        ))
+            engine="factor_lab",
+            mode=mode,
+            status_code=500,
+        )
 
 
 # ====================
@@ -256,7 +315,16 @@ async def post_signal_run(request: Request) -> JSONResponse:
         return _error("Request body must be a JSON object.")
 
     run_id = _resolve_run_id(payload, "signal_construction")
-    mode = str(payload.get("_mode", "construct")).strip().lower()
+    try:
+        mode = _validate_mode(payload.get("_mode", "construct"), {"construct", "backtest"})
+    except ValueError as exc:
+        return _error_envelope(
+            str(exc),
+            run_id=run_id,
+            engine="signal_construction",
+            mode=str(payload.get("_mode", "construct")),
+            status_code=400,
+        )
 
     try:
         signal_construction_api = get_signal_construction_api()
@@ -273,17 +341,21 @@ async def post_signal_run(request: Request) -> JSONResponse:
             meta={"engine": "signal_construction", "mode": mode},
         ))
     except ValueError as exc:
-        return JSONResponse(error_response(
+        return _error_envelope(
             str(exc),
             run_id=run_id,
-            meta={"engine": "signal_construction", "mode": mode},
-        ))
+            engine="signal_construction",
+            mode=mode,
+            status_code=400,
+        )
     except Exception as exc:
-        return JSONResponse(error_response(
+        return _error_envelope(
             str(exc),
             run_id=run_id,
-            meta={"engine": "signal_construction", "mode": mode},
-        ))
+            engine="signal_construction",
+            mode=mode,
+            status_code=500,
+        )
 
 
 # ====================
@@ -305,11 +377,13 @@ async def get_stock_filter_meta() -> JSONResponse:
             meta={"engine": "stock_filter", "mode": "meta"},
         ))
     except Exception as exc:
-        return JSONResponse(error_response(
+        return _error_envelope(
             str(exc),
             run_id=run_id,
-            meta={"engine": "stock_filter", "mode": "meta"},
-        ))
+            engine="stock_filter",
+            mode="meta",
+            status_code=500,
+        )
 
 
 @app.post("/api/stock_filter")
@@ -325,7 +399,16 @@ async def post_stock_filter_run(request: Request) -> JSONResponse:
         return _error("Request body must be a JSON object.")
 
     run_id = _resolve_run_id(payload, "stock_filter")
-    mode = str(payload.get("_mode", "run")).strip().lower()
+    try:
+        mode = _validate_mode(payload.get("_mode", "run"), {"run", "meta"})
+    except ValueError as exc:
+        return _error_envelope(
+            str(exc),
+            run_id=run_id,
+            engine="stock_filter",
+            mode=str(payload.get("_mode", "run")),
+            status_code=400,
+        )
 
     try:
         stock_filter_api = get_stock_filter_api()
@@ -341,14 +424,18 @@ async def post_stock_filter_run(request: Request) -> JSONResponse:
             meta={"engine": "stock_filter", "mode": mode},
         ))
     except ValueError as exc:
-        return JSONResponse(error_response(
+        return _error_envelope(
             str(exc),
             run_id=run_id,
-            meta={"engine": "stock_filter", "mode": mode},
-        ))
+            engine="stock_filter",
+            mode=mode,
+            status_code=400,
+        )
     except Exception as exc:
-        return JSONResponse(error_response(
+        return _error_envelope(
             str(exc),
             run_id=run_id,
-            meta={"engine": "stock_filter", "mode": mode},
-        ))
+            engine="stock_filter",
+            mode=mode,
+            status_code=500,
+        )

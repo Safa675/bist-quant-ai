@@ -1,5 +1,5 @@
 import { existsSync } from "fs";
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { mkdir, readFile, rename, writeFile } from "fs/promises";
 import { saveArtifact, type StoredArtifact } from "@/lib/server/artifactStore";
 import {
     type EngineError,
@@ -17,6 +17,7 @@ interface RunStoreState {
 const DEFAULT_STATE: RunStoreState = {
     runs: [],
 };
+let mutationChain: Promise<void> = Promise.resolve();
 
 function nowIso(): string {
     return new Date().toISOString();
@@ -88,7 +89,27 @@ async function readState(): Promise<RunStoreState> {
 
 async function writeState(state: RunStoreState): Promise<void> {
     await ensureStoreDir();
-    await writeFile(RUN_STORE_PATH, JSON.stringify(state, null, 2), "utf-8");
+    const tmpPath = `${RUN_STORE_PATH}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(tmpPath, JSON.stringify(state, null, 2), "utf-8");
+    await rename(tmpPath, RUN_STORE_PATH);
+}
+
+async function withExclusiveMutation<T>(mutate: (state: RunStoreState) => Promise<T> | T): Promise<T> {
+    const previous = mutationChain;
+    let release!: () => void;
+    mutationChain = new Promise<void>((resolve) => {
+        release = resolve;
+    });
+
+    await previous;
+    try {
+        const state = await readState();
+        const result = await mutate(state);
+        await writeState(state);
+        return result;
+    } finally {
+        release();
+    }
 }
 
 function sortRuns(runs: RunRecord[]): RunRecord[] {
@@ -110,25 +131,25 @@ export async function createRun(input: {
     meta?: Record<string, unknown>;
     id?: string;
 }): Promise<RunRecord> {
-    const state = await readState();
-    const now = nowIso();
-    const created: RunRecord = {
-        id: input.id?.trim() || runId(input.kind),
-        kind: input.kind,
-        status: input.status || "queued",
-        created_at: now,
-        updated_at: now,
-        request: input.request,
-        meta: input.meta,
-    };
+    return withExclusiveMutation((state) => {
+        const now = nowIso();
+        const created: RunRecord = {
+            id: input.id?.trim() || runId(input.kind),
+            kind: input.kind,
+            status: input.status || "queued",
+            created_at: now,
+            updated_at: now,
+            request: input.request,
+            meta: input.meta,
+        };
 
-    if (created.status === "running") {
-        created.started_at = now;
-    }
+        if (created.status === "running") {
+            created.started_at = now;
+        }
 
-    state.runs.push(created);
-    await writeState(state);
-    return created;
+        state.runs.push(created);
+        return created;
+    });
 }
 
 export async function listRuns(options?: {
@@ -169,37 +190,37 @@ export async function updateRun(input: {
     artifact_id?: string;
     error?: EngineError | null;
 }): Promise<RunRecord | null> {
-    const state = await readState();
-    const idx = state.runs.findIndex((run) => run.id === input.id);
-    if (idx < 0) {
-        return null;
-    }
+    return withExclusiveMutation((state) => {
+        const idx = state.runs.findIndex((run) => run.id === input.id);
+        if (idx < 0) {
+            return null;
+        }
 
-    const current = state.runs[idx];
-    const next: RunRecord = {
-        ...current,
-        status: input.status || current.status,
-        updated_at: nowIso(),
-        meta: mergeMeta(current.meta, input.meta),
-        artifact_id: input.artifact_id ?? current.artifact_id,
-        error: input.error === null ? undefined : (input.error ?? current.error),
-    };
+        const current = state.runs[idx];
+        const next: RunRecord = {
+            ...current,
+            status: input.status || current.status,
+            updated_at: nowIso(),
+            meta: mergeMeta(current.meta, input.meta),
+            artifact_id: input.artifact_id ?? current.artifact_id,
+            error: input.error === null ? undefined : (input.error ?? current.error),
+        };
 
-    if (next.status === "running" && !next.started_at) {
-        next.started_at = nowIso();
-    }
-    if (next.status === "queued") {
-        next.started_at = undefined;
-        next.finished_at = undefined;
-    }
+        if (next.status === "running" && !next.started_at) {
+            next.started_at = nowIso();
+        }
+        if (next.status === "queued") {
+            next.started_at = undefined;
+            next.finished_at = undefined;
+        }
 
-    if (["succeeded", "failed", "cancelled"].includes(next.status) && !next.finished_at) {
-        next.finished_at = nowIso();
-    }
+        if (["succeeded", "failed", "cancelled"].includes(next.status) && !next.finished_at) {
+            next.finished_at = nowIso();
+        }
 
-    state.runs[idx] = next;
-    await writeState(state);
-    return next;
+        state.runs[idx] = next;
+        return next;
+    });
 }
 
 export async function markRunRunning(id: string, meta?: Record<string, unknown>): Promise<RunRecord | null> {
@@ -252,6 +273,11 @@ export async function saveRunArtifact(input: {
     payload: unknown;
     meta?: Record<string, unknown>;
 }): Promise<{ run: RunRecord; artifact: StoredArtifact } | null> {
+    const existing = await getRun(input.id);
+    if (!existing) {
+        return null;
+    }
+
     const artifact = await saveArtifact({
         kind: input.kind,
         payload: input.payload,

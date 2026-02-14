@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime
+import math
+from datetime import datetime, timezone
 from typing import Any
 
 import borsapy as bp
@@ -28,9 +29,34 @@ def _to_float(value: Any) -> float | None:
     try:
         if value is None:
             return None
-        return float(value)
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            return None
+        return parsed
     except Exception:
         return None
+
+
+def _utc_iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_change_pct(raw_change_pct: Any, value: float | None, prev_close: float | None) -> float | None:
+    computed = None
+    if value is not None and prev_close not in (None, 0.0):
+        computed = ((value - prev_close) / prev_close) * 100.0
+
+    provided = _to_float(raw_change_pct)
+    if provided is None:
+        return computed
+    if computed is None:
+        return provided
+
+    if abs(provided - computed) <= 0.15:
+        return provided
+    if abs((provided * 100.0) - computed) <= 0.15:
+        return provided * 100.0
+    return computed
 
 
 def _quote_payload(symbol: str) -> dict[str, Any]:
@@ -63,10 +89,10 @@ def _quote_payload(symbol: str) -> dict[str, Any]:
             "open": _to_float(fast_info.get("open")),
             "prev_close": prev_close,
             "market_cap": _to_float(fast_info.get("market_cap")),
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": _utc_iso_now(),
         }
     except Exception as exc:
-        return {"symbol": symbol, "error": str(exc), "timestamp": datetime.now().isoformat()}
+        return {"symbol": symbol, "error": str(exc), "timestamp": _utc_iso_now()}
 
 
 def get_quote(symbol: str) -> dict[str, Any]:
@@ -80,7 +106,7 @@ def get_quotes(symbols: list[str]) -> dict[str, Any]:
     return {
         "quotes": quotes,
         "count": len(quotes),
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": _utc_iso_now(),
     }
 
 
@@ -91,18 +117,16 @@ def get_index(index_name: str) -> dict[str, Any]:
         info = idx.info if isinstance(idx.info, dict) else {}
         value = _to_float(info.get("last"))
         prev_close = _to_float(info.get("close"))
-        change_pct = _to_float(info.get("change_percent"))
-        if change_pct is None and value is not None and prev_close not in (None, 0.0):
-            change_pct = ((value - prev_close) / prev_close) * 100.0
+        change_pct = _normalize_change_pct(info.get("change_percent"), value, prev_close)
         return {
             "index": index_name,
             "value": value,
             "change_pct": change_pct,
             "prev_close": prev_close,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": _utc_iso_now(),
         }
     except Exception as exc:
-        return {"index": index_name, "error": str(exc), "timestamp": datetime.now().isoformat()}
+        return {"index": index_name, "error": str(exc), "timestamp": _utc_iso_now()}
 
 
 def get_portfolio(payload: dict[str, Any]) -> dict[str, Any]:
@@ -139,6 +163,8 @@ def get_portfolio(payload: dict[str, Any]) -> dict[str, Any]:
     positions: list[dict[str, Any]] = []
     total_value = 0.0
     total_cost = 0.0
+    total_value_with_cost = 0.0
+    positions_with_cost_basis = 0
 
     for symbol, quantity in holdings.items():
         quote = quotes.get(symbol, {})
@@ -169,6 +195,8 @@ def get_portfolio(payload: dict[str, Any]) -> dict[str, Any]:
             pnl = market_value - cost
             pnl_pct = (pnl / cost * 100.0) if cost > 0 else 0.0
             total_cost += cost
+            total_value_with_cost += market_value
+            positions_with_cost_basis += 1
             row.update(
                 {
                     "cost_basis": unit_cost,
@@ -182,22 +210,23 @@ def get_portfolio(payload: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {
         "total_value": total_value,
         "positions": sorted(positions, key=lambda x: x.get("market_value", 0.0), reverse=True),
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": _utc_iso_now(),
     }
-    if cost_basis:
-        total_pnl = total_value - total_cost
+    if positions_with_cost_basis > 0:
+        total_pnl = total_value_with_cost - total_cost
         result.update(
             {
                 "total_cost": total_cost,
                 "total_pnl": total_pnl,
                 "total_pnl_pct": (total_pnl / total_cost * 100.0) if total_cost > 0 else 0.0,
+                "priced_with_cost_basis": positions_with_cost_basis,
             }
         )
     return result
 
 
 def get_market() -> dict[str, Any]:
-    summary: dict[str, Any] = {"timestamp": datetime.now().isoformat()}
+    summary: dict[str, Any] = {"timestamp": _utc_iso_now()}
     summary["xu100"] = get_index("XU100")
     summary["xu030"] = get_index("XU030")
 

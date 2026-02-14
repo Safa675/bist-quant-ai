@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { EngineError, RunStatus } from "@/lib/contracts/run";
 import { isObjectRecord } from "@/lib/contracts/run";
-import { readArtifactByPath } from "@/lib/server/artifactStore";
+import { readArtifactById } from "@/lib/server/artifactStore";
 import { enqueueRun, getQueueSnapshot } from "@/lib/server/jobQueue";
 import {
     getRun,
@@ -24,6 +24,27 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const RUN_STATUSES: RunStatus[] = ["queued", "running", "succeeded", "failed", "cancelled"];
+const RESERVED_META_KEYS = new Set(["artifact_path", "artifact_id", "engine_meta", "engine_run_id", "trace_id"]);
+
+async function parseJsonObjectBody(request: NextRequest): Promise<Record<string, unknown> | null> {
+    try {
+        const body: unknown = await request.json();
+        return isObjectRecord(body) ? body : null;
+    } catch {
+        return null;
+    }
+}
+
+function sanitizeClientMeta(meta: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+    if (!meta) return undefined;
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(meta)) {
+        if (!RESERVED_META_KEYS.has(key)) {
+            out[key] = value;
+        }
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+}
 
 function normalizeError(raw: unknown): EngineError | null {
     if (typeof raw === "string" && raw.trim()) {
@@ -86,11 +107,7 @@ export async function GET(
             );
         }
 
-        const artifactPath = isObjectRecord(run.meta) && typeof run.meta.artifact_path === "string"
-            ? run.meta.artifact_path
-            : null;
-
-        const artifact = artifactPath ? await readArtifactByPath(artifactPath) : null;
+        const artifact = run.artifact_id ? await readArtifactById(run.artifact_id) : null;
         telemetryInfo("api.run.get.success", {
             trace_id: traceId,
             run_id: run.id,
@@ -136,12 +153,12 @@ export async function PATCH(
 
         const traceId = resolveTraceId(existing.meta?.trace_id, requestTrace, runId);
 
-        const body: unknown = await request.json();
-        if (!isObjectRecord(body)) {
+        const body = await parseJsonObjectBody(request);
+        if (!body) {
             telemetryInfo("api.run.patch.bad_request", {
                 trace_id: traceId,
                 run_id: runId,
-                reason: "non_object_body",
+                reason: "invalid_json_or_non_object",
             });
             return NextResponse.json(
                 { error: "Request body must be a JSON object." },
@@ -151,7 +168,15 @@ export async function PATCH(
 
         const status = typeof body.status === "string" ? body.status : undefined;
         const action = typeof body.action === "string" ? body.action.toLowerCase() : "";
-        const meta = isObjectRecord(body.meta) ? body.meta : undefined;
+        const rawMeta = isObjectRecord(body.meta) ? body.meta : undefined;
+        const meta = sanitizeClientMeta(rawMeta);
+        if (rawMeta && !meta) {
+            telemetryInfo("api.run.patch.meta_sanitized", {
+                trace_id: traceId,
+                run_id: runId,
+                dropped_meta_keys: Object.keys(rawMeta).filter((key) => RESERVED_META_KEYS.has(key)),
+            });
+        }
 
         if (status && !RUN_STATUSES.includes(status as RunStatus)) {
             telemetryInfo("api.run.patch.bad_request", {

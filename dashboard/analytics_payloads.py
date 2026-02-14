@@ -8,6 +8,13 @@ import numpy as np
 import pandas as pd
 
 
+def _normalize_ticker(value: Any) -> str:
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return ""
+    return raw.split(".")[0]
+
+
 def _to_series(values: pd.Series | None) -> pd.Series:
     if values is None:
         return pd.Series(dtype="float64")
@@ -196,12 +203,48 @@ def _turnover_metrics(holdings_history: Any) -> dict[str, Any]:
             "rebalance_events": 0,
         }
 
-    frame["ticker"] = frame["ticker"].astype(str)
+    frame["ticker"] = frame["ticker"].map(_normalize_ticker)
+    frame = frame[frame["ticker"] != ""]
+    if frame.empty:
+        return {
+            "avg_positions": None,
+            "avg_turnover": None,
+            "rebalance_events": 0,
+        }
 
-    per_day = {}
+    per_day: dict[pd.Timestamp, dict[str, float]] = {}
+    has_weight_col = "weight" in frame.columns
+    if has_weight_col:
+        frame["weight"] = pd.to_numeric(frame["weight"], errors="coerce")
+
     for dt, group in frame.groupby(frame["date"].dt.normalize()):
-        tickers = set(group["ticker"].tolist())
-        per_day[pd.Timestamp(dt)] = tickers
+        day = pd.Timestamp(dt)
+        tickers = sorted(set(group["ticker"].tolist()))
+        if not tickers:
+            per_day[day] = {}
+            continue
+
+        weights: dict[str, float]
+        if has_weight_col:
+            weighted = (
+                group.dropna(subset=["weight"])
+                .groupby("ticker")["weight"]
+                .sum()
+                .astype("float64")
+            )
+            weighted = weighted.replace([np.inf, -np.inf], np.nan).dropna()
+            weighted = weighted[weighted > 0]
+            total_weight = float(weighted.sum())
+            if total_weight > 0:
+                weights = {str(t): float(w / total_weight) for t, w in weighted.items()}
+            else:
+                equal = 1.0 / float(len(tickers))
+                weights = {ticker: equal for ticker in tickers}
+        else:
+            equal = 1.0 / float(len(tickers))
+            weights = {ticker: equal for ticker in tickers}
+
+        per_day[day] = weights
 
     ordered_days = sorted(per_day.keys())
     if not ordered_days:
@@ -217,13 +260,18 @@ def _turnover_metrics(holdings_history: Any) -> dict[str, Any]:
     prev = per_day[ordered_days[0]]
     for day in ordered_days[1:]:
         current = per_day[day]
-        if len(current) == 0 and len(prev) == 0:
+        if not current and not prev:
             prev = current
             continue
 
-        changed = len(current.symmetric_difference(prev))
-        base = max(len(prev), 1)
-        turnovers.append(changed / base)
+        universe = set(prev.keys()) | set(current.keys())
+        # One-way turnover: 0.5 * sum(|w_t - w_t-1|), bounded in [0, 1] for long-only normalized weights.
+        one_way_turnover = 0.5 * sum(
+            abs(float(current.get(ticker, 0.0)) - float(prev.get(ticker, 0.0)))
+            for ticker in universe
+        )
+        one_way_turnover = min(max(float(one_way_turnover), 0.0), 1.0)
+        turnovers.append(one_way_turnover)
         prev = current
 
     return {

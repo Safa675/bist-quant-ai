@@ -1,6 +1,6 @@
 import { existsSync } from "fs";
-import { mkdir, readFile, stat, writeFile } from "fs/promises";
-import { basename, join } from "path";
+import { mkdir, readFile, rename, stat, writeFile } from "fs/promises";
+import { basename, isAbsolute, join, relative, resolve } from "path";
 import { ARTIFACTS_DIR } from "@/lib/server/storagePaths";
 
 export interface StoredArtifact {
@@ -24,8 +24,22 @@ function sanitize(value: string): string {
         .slice(0, 64) || "artifact";
 }
 
+function normalizeArtifactId(value: string): string | null {
+    const trimmed = (value || "").trim().toLowerCase();
+    if (!trimmed) return null;
+    if (!/^[a-z0-9_]{1,128}$/.test(trimmed)) return null;
+    return trimmed;
+}
+
 async function ensureArtifactsDir(): Promise<void> {
     await mkdir(ARTIFACTS_DIR, { recursive: true });
+}
+
+function isPathInsideArtifactsDir(candidatePath: string): boolean {
+    const artifactsRoot = resolve(ARTIFACTS_DIR);
+    const candidate = resolve(candidatePath);
+    const rel = relative(artifactsRoot, candidate);
+    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
 export async function saveArtifact(input: {
@@ -40,8 +54,10 @@ export async function saveArtifact(input: {
     const id = `${kind}_${runPart}_${Date.now()}`;
     const fileName = `${id}.json`;
     const filePath = join(ARTIFACTS_DIR, fileName);
+    const tempPath = `${filePath}.tmp`;
 
-    await writeFile(filePath, JSON.stringify(input.payload, null, 2), "utf-8");
+    await writeFile(tempPath, JSON.stringify(input.payload, null, 2), "utf-8");
+    await rename(tempPath, filePath);
     const info = await stat(filePath);
 
     return {
@@ -54,7 +70,7 @@ export async function saveArtifact(input: {
 }
 
 export async function readArtifactByPath(path: string): Promise<unknown | null> {
-    if (!path || !existsSync(path)) {
+    if (!path || !isPathInsideArtifactsDir(path) || !existsSync(path)) {
         return null;
     }
 
@@ -67,8 +83,11 @@ export async function readArtifactByPath(path: string): Promise<unknown | null> 
 }
 
 export async function readArtifactById(id: string): Promise<unknown | null> {
-    const safe = sanitize(id);
-    const candidatePath = join(ARTIFACTS_DIR, `${safe}.json`);
+    const normalized = normalizeArtifactId(id);
+    if (!normalized) {
+        return null;
+    }
+    const candidatePath = join(ARTIFACTS_DIR, `${normalized}.json`);
     return readArtifactByPath(candidatePath);
 }
 

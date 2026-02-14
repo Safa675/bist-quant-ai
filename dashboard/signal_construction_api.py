@@ -23,8 +23,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from analytics_payloads import build_backtest_analytics_v2
-from common_response import error_response, generate_run_id, success_response
+try:
+    from analytics_payloads import build_backtest_analytics_v2
+    from common_response import error_response, generate_run_id, success_response
+except ModuleNotFoundError:
+    # Supports module loading via api/index.py (repo root on sys.path).
+    from dashboard.analytics_payloads import build_backtest_analytics_v2
+    from dashboard.common_response import error_response, generate_run_id, success_response
 
 
 APP_ROOT = Path(__file__).resolve().parent.parent
@@ -79,7 +84,10 @@ def _safe_float(value: Any) -> float | None:
             return None
         if pd.isna(value):
             return None
-        return float(value)
+        parsed = float(value)
+        if not np.isfinite(parsed):
+            return None
+        return parsed
     except Exception:
         return None
 
@@ -125,7 +133,10 @@ def _as_int(value: Any, default: int, minimum: int | None = None, maximum: int |
 
 def _as_float(value: Any, default: float) -> float:
     try:
-        return float(value)
+        parsed = float(value)
+        if not np.isfinite(parsed):
+            return default
+        return parsed
     except Exception:
         return default
 
@@ -315,6 +326,8 @@ def _resolve_runtime_config(payload: dict[str, Any]) -> dict[str, Any]:
     top_n = _as_int(payload.get("top_n"), 30, minimum=1, maximum=200)
     buy_threshold = _as_float(payload.get("buy_threshold"), 0.2)
     sell_threshold = _as_float(payload.get("sell_threshold"), -0.2)
+    if buy_threshold <= sell_threshold:
+        raise ValueError("buy_threshold must be greater than sell_threshold.")
 
     custom_symbols = _as_symbol_list(payload.get("symbols"))
     indicator_payload = _normalize_indicator_payload(payload.get("indicators"))
@@ -1064,6 +1077,8 @@ def _main() -> int:
         if isinstance(requested_run_id, str) and requested_run_id.strip():
             run_id = requested_run_id.strip()
         mode = str(payload.get("_mode", "construct")).strip().lower()
+        if mode not in {"construct", "backtest"}:
+            raise ValueError("Unsupported mode. Use 'construct' or 'backtest'.")
         if mode == "backtest":
             response = _build_backtest_response(payload)
         else:

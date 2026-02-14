@@ -16,7 +16,9 @@ import json
 import warnings
 import sys
 
-warnings.filterwarnings('ignore')
+# Only suppress specific known harmless warnings, not all warnings
+warnings.filterwarnings('ignore', category=FutureWarning, module='pandas')
+warnings.filterwarnings('ignore', message='.*defaulting to pandas.*')
 
 # Regime filter directory candidates (support both naming schemes)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -551,8 +553,16 @@ class DataLoader:
         """Build close price panel (Date x Ticker)"""
         if self._close_df is None:
             print("  Building close price panel...")
-            close_df = prices.pivot_table(index='Date', columns='Ticker', values='Close').sort_index()
-            close_df.columns = [c.split('.')[0].upper() for c in close_df.columns]
+            # Normalize ticker names before pivot to avoid silent averaging of duplicates
+            prices = prices.copy()
+            prices['Ticker'] = prices['Ticker'].apply(lambda x: str(x).split('.')[0].upper())
+            # Use aggfunc='last' to take the last value if duplicates exist
+            close_df = prices.pivot_table(
+                index='Date',
+                columns='Ticker',
+                values='Close',
+                aggfunc='last'
+            ).sort_index()
             self._close_df = close_df
             print(f"  ✅ Close panel: {close_df.shape[0]} days × {close_df.shape[1]} tickers")
         return self._close_df
@@ -561,8 +571,15 @@ class DataLoader:
         """Build open price panel (Date x Ticker)"""
         if self._open_df is None:
             print("  Building open price panel...")
-            open_df = prices.pivot_table(index='Date', columns='Ticker', values='Open').sort_index()
-            open_df.columns = [c.split('.')[0].upper() for c in open_df.columns]
+            # Normalize ticker names before pivot to avoid silent averaging of duplicates
+            prices = prices.copy()
+            prices['Ticker'] = prices['Ticker'].apply(lambda x: str(x).split('.')[0].upper())
+            open_df = prices.pivot_table(
+                index='Date',
+                columns='Ticker',
+                values='Open',
+                aggfunc='last'
+            ).sort_index()
             self._open_df = open_df
             print(f"  ✅ Open panel: {open_df.shape[0]} days × {open_df.shape[1]} tickers")
         return self._open_df
@@ -571,8 +588,15 @@ class DataLoader:
         """Build rolling median volume panel"""
         if self._volume_df is None:
             print(f"  Building volume panel (lookback={lookback})...")
-            vol_pivot = prices.pivot_table(index="Date", columns="Ticker", values="Volume").sort_index()
-            vol_pivot.columns = [c.split('.')[0].upper() for c in vol_pivot.columns]
+            # Normalize ticker names before pivot
+            prices = prices.copy()
+            prices['Ticker'] = prices['Ticker'].apply(lambda x: str(x).split('.')[0].upper())
+            vol_pivot = prices.pivot_table(
+                index="Date",
+                columns="Ticker",
+                values="Volume",
+                aggfunc='last'
+            ).sort_index()
             
             # Drop holiday rows
             valid_pct = vol_pivot.notna().mean(axis=1)
@@ -873,7 +897,9 @@ class DataLoader:
             df = pd.read_csv(csv_path)
             df['Date'] = pd.to_datetime(df['Date'])
             df = df.set_index('Date').sort_index()
-            self._xu100_prices = df['Open'] if 'Open' in df.columns else df.iloc[:, 0]
+            # Use Close price for consistency with portfolio returns calculation
+            # Open price would cause off-by-one-day errors in benchmarking
+            self._xu100_prices = df['Close'] if 'Close' in df.columns else df.iloc[:, 0]
             print(f"  ✅ Loaded {len(self._xu100_prices)} XU100 observations")
         return self._xu100_prices
     

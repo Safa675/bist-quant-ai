@@ -16,6 +16,22 @@ def _utc_iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _resolve_run_id(run_id: str | None = None) -> str:
+    if run_id is None:
+        return generate_run_id()
+    candidate = str(run_id).strip()
+    if not candidate:
+        return generate_run_id()
+    return candidate
+
+
+def _response_meta(meta: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = dict(meta or {})
+    # Keep server timestamp authoritative even if caller passes timestamp in meta.
+    payload["timestamp"] = _utc_iso_now()
+    return payload
+
+
 def success_response(
     result: Any,
     *,
@@ -23,11 +39,8 @@ def success_response(
     meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
-        "run_id": run_id or generate_run_id(),
-        "meta": {
-            "timestamp": _utc_iso_now(),
-            **(meta or {}),
-        },
+        "run_id": _resolve_run_id(run_id),
+        "meta": _response_meta(meta),
         "result": result,
         "error": None,
     }
@@ -42,11 +55,8 @@ def error_response(
     meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
-        "run_id": run_id or generate_run_id(),
-        "meta": {
-            "timestamp": _utc_iso_now(),
-            **(meta or {}),
-        },
+        "run_id": _resolve_run_id(run_id),
+        "meta": _response_meta(meta),
         "result": None,
         "error": {
             "code": code,
